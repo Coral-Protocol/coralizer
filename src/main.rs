@@ -24,10 +24,12 @@ pub enum Cli {
 }
 #[derive(clap::Args)]
 pub struct McpParams {
+    pub path: PathBuf,
+
     #[arg(long, short)]
     pub framework: Option<Framework>,
-
-    pub path: PathBuf,
+    #[arg(long, short)]
+    pub name: Option<String>,
 }
 
 pub mod frameworks;
@@ -149,6 +151,18 @@ impl Mcp {
 }
 
 fn mcp_wizard(params: McpParams) -> InquireResult<()> {
+    let agent_name = params.name.unwrap_or_else(|| {
+        params
+            .path
+            .canonicalize()
+            .unwrap()
+            .file_name()
+            .expect("folder name not in output path")
+            .to_str()
+            .expect("folder name to be utf8")
+            .to_string()
+    });
+
     if fs::exists(&params.path).unwrap() {
         if !inquire::Confirm::new(&format!(
             "'{}' already exists - continue & delete existing?",
@@ -292,8 +306,19 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 let mut agent_toml: DocumentMut =
                     std::fs::read_to_string(&agent_toml_path)?.parse().unwrap();
 
+                let Some(toml_agent_name) = agent_toml
+                    .get_mut("agent")
+                    .and_then(|agent| agent.get_mut("name"))
+                    .and_then(|name| name.as_value_mut())
+                else {
+                    eprintln!("No agent.name key found in coral-agent.toml!");
+                    return Ok(());
+                };
+
+                *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+
                 let Some(options) = agent_toml.get_mut("options") else {
-                    eprintln!("No options table found in coral-agent.toml");
+                    eprintln!("No options table found in coral-agent.toml!");
                     return Ok(());
                 };
                 let options = options.as_table_mut().expect("'options' key to be a table");
@@ -317,6 +342,8 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 );
 
                 std::fs::write(final_toml, agent_toml.to_string())?;
+
+                Langchain::post_process(&params.path, &agent_name);
 
                 Ok::<(), Box<std::io::Error>>(())
             });

@@ -52,4 +52,5 @@ pub trait Template {
         true
     }
     fn template(mcps: &[Mcp], contents: &str) -> String;
+    fn post_process(root: &Path, agent_name: &str) -> std::io::Result<()>;
 }

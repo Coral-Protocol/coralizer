@@ -1,8 +1,10 @@
 use std::fmt::Write as _;
+use std::io;
 use std::path::Path;
 
 use itertools::Itertools;
 use regex::Regex;
+use toml_edit::{DocumentMut, Formatted};
 
 use crate::Mcp;
 use crate::frameworks::Template;
@@ -84,5 +86,38 @@ impl Template for Langchain {
             panic!("bad");
         }
         contents
+    }
+
+    fn post_process(root: &Path, agent_name: &str) -> std::io::Result<()> {
+        let pyproject_path = root.join("pyproject.toml");
+        let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
+
+        let Some(project_name) = pyproject
+            .get_mut("project")
+            .and_then(|e| e.get_mut("name"))
+            .and_then(|e| e.as_value_mut())
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No project.name key found in pyproject.toml!",
+            ));
+        };
+        *project_name = toml_edit::Value::String(Formatted::new(agent_name.to_string()));
+
+        let Some(project_desc) = pyproject
+            .get_mut("project")
+            .and_then(|e| e.get_mut("description"))
+            .and_then(|e| e.as_value_mut())
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No project.name key found in pyproject.toml!",
+            ));
+        };
+        *project_desc =
+            toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
+
+        std::fs::write(pyproject_path, pyproject.to_string())?;
+        Ok(())
     }
 }
