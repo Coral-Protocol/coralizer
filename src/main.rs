@@ -1,21 +1,21 @@
+use clap::Parser;
+use ignore::{WalkBuilder, WalkState};
+use inquire::{error::InquireResult, validator::ValueRequiredValidator};
+use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     fs::{self, File},
     hash::Hash,
-    io::{self, Write},
+    io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-
-use clap::Parser;
-use ignore::{WalkBuilder, WalkState};
-use inquire::{error::InquireResult, validator::ValueRequiredValidator};
-use itertools::Itertools;
 use toml_edit::{DocumentMut, Formatted, InlineTable, TableLike};
 use zip::read::root_dir_common_filter;
 
 use crate::frameworks::{Framework, Langchain, Template};
+use crate::mcp_server::McpServers;
 use custom_derive::custom_derive;
 use enum_derive::*;
 
@@ -26,6 +26,7 @@ pub enum Cli {
 #[derive(clap::Args)]
 pub struct McpParams {
     pub path: PathBuf,
+    pub mcp_servers_path: PathBuf,
 
     #[arg(long, short)]
     pub framework: Option<Framework>,
@@ -34,6 +35,7 @@ pub struct McpParams {
 }
 
 pub mod frameworks;
+pub mod mcp_server;
 
 pub mod languages {
     use custom_derive::custom_derive;
@@ -163,7 +165,23 @@ impl Mcp {
     }
 }
 
-fn mcp_wizard(params: McpParams) -> InquireResult<()> {
+async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
+    if fs::exists(&params.path).unwrap() {
+        if !inquire::Confirm::new(&format!(
+            "'{}' already exists - continue & delete existing?",
+            params.path.as_path().display()
+        ))
+            .with_default(false)
+            .prompt()?
+        {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+    else {
+        fs::create_dir_all(&params.path)?;
+    }
+
     let agent_name = params.name.unwrap_or_else(|| {
         params
             .path
@@ -176,18 +194,6 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             .to_string()
     });
 
-    if fs::exists(&params.path).unwrap() {
-        if !inquire::Confirm::new(&format!(
-            "'{}' already exists - continue & delete existing?",
-            params.path.as_path().display()
-        ))
-        .with_default(false)
-        .prompt()?
-        {
-            println!("Cancelled.");
-            return Ok(());
-        }
-    }
     let framework = match params.framework {
         Some(framework) => framework,
         None => inquire::Select::new(
@@ -199,19 +205,21 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .prompt()?,
     };
 
-    let mut mcps: Vec<Mcp> = vec![];
-    let mut runtimes: HashSet<Runtime> = HashSet::new();
+    let mcp_servers: McpServers = serde_json::from_str(
+        fs::read_to_string(params.mcp_servers_path)
+            .unwrap()
+            .as_str()
+    ).expect("invalid json");
 
     let mcp_kind = inquire::Select::new(
         "What kind of MCP server are you adding?",
         McpKind::iter_variants().collect_vec(),
-    )
-    .prompt()?;
 
-    if let Some(runtime) = mcp_kind.runtime() {
-        runtimes.insert(runtime);
-    }
-    mcps.push(mcp_kind.wizard()?);
+    let description = mcp_servers.generate_description().await;
+    let mcps: Vec<Mcp> = mcp_servers.into();
+
+    // todo: alan what was the purpose of this...
+    let runtimes: HashSet<Runtime> = HashSet::from([Runtime::Npx]);
 
     match framework {
         Framework::Langchain => {
@@ -226,7 +234,7 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
             fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
 
-            let response = reqwest::blocking::get(url).unwrap().bytes().unwrap();
+            let response = reqwest::get(url).await.unwrap().bytes().await.unwrap();
 
             let mut artefact = File::create(&artefact_path).unwrap();
             artefact.write_all(&response);
@@ -325,6 +333,12 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 let mut agent_toml: DocumentMut =
                     std::fs::read_to_string(&agent_toml_path)?.parse().unwrap();
 
+                // todo: alan (remove unwrap please, also, what happens if description set in template?...)
+                agent_toml.get_mut("agent").unwrap().as_table_mut().unwrap().insert(
+                    "description",
+                    description.into()
+                );
+
                 let Some(toml_agent_name) = agent_toml
                     .get_mut("agent")
                     .and_then(|agent| agent.get_mut("name"))
@@ -377,12 +391,13 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     Ok(())
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     match cli {
         Cli::Mcp(params) => {
-            if let Err(e) = mcp_wizard(params) {
+            if let Err(e) = mcp_wizard(params).await {
                 match e {
                     inquire::InquireError::OperationCanceled
                     | inquire::InquireError::OperationInterrupted => {
