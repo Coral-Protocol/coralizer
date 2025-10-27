@@ -1,11 +1,11 @@
 use custom_derive::custom_derive;
 use enum_derive::*;
-use std::{fmt::Display, path::Path};
+use std::{collections::HashSet, fmt::Display, path::Path};
 
 mod langchain;
 pub use langchain::*;
 
-use crate::{Mcp, languages::Language};
+use crate::{Mcp, Runtime, languages::Language};
 
 custom_derive! {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, clap::ValueEnum)]
@@ -40,17 +40,17 @@ impl Display for Framework {
 }
 
 pub trait Template {
-    fn name() -> &'static str;
-    fn artifact() -> (&'static str, &'static str);
+    fn name(&self) -> &'static str;
+    fn artifact(&self) -> (&'static str, &'static str);
 
     fn include_file(entry: &ignore::DirEntry) -> bool {
         let _ = entry;
         true
     }
-    fn is_templated_file(path: &Path) -> bool {
+    fn is_templated_file(&self, path: &Path) -> bool {
         let _ = path;
         true
     }
-    fn template(mcps: &[Mcp], contents: &str) -> String;
-    fn post_process(root: &Path, agent_name: &str) -> std::io::Result<()>;
+    fn template(&self, mcps: &[Mcp], contents: &str) -> String;
+    fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()>;
 }

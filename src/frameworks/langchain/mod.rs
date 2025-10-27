@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
@@ -6,16 +7,19 @@ use itertools::Itertools;
 use regex::Regex;
 use toml_edit::{DocumentMut, Formatted};
 
-use crate::Mcp;
 use crate::frameworks::Template;
+use crate::{Mcp, Runtime};
 
-pub struct Langchain;
+#[derive(Clone)]
+pub struct Langchain {
+    pub runtimes: HashSet<Runtime>,
+}
 
 impl Template for Langchain {
-    fn name() -> &'static str {
+    fn name(&self) -> &'static str {
         "langchain-agent"
     }
-    fn artifact() -> (&'static str, &'static str) {
+    fn artifact(&self) -> (&'static str, &'static str) {
         (
             "https://github.com/Coral-Protocol/langchain-agent/archive/fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
             "fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
@@ -32,13 +36,13 @@ impl Template for Langchain {
         }
         true
     }
-    fn is_templated_file(entry: &Path) -> bool {
+    fn is_templated_file(&self, entry: &Path) -> bool {
         if entry.file_name().map(|n| n == "main.py").unwrap_or(false) {
             return true;
         }
         false
     }
-    fn template(mcps: &[Mcp], contents: &str) -> String {
+    fn template(&self, mcps: &[Mcp], contents: &str) -> String {
         let mcp_client_re =
             Regex::new(r#"MultiServerMCPClient\s*\(\s*connections\s*=\s*\{\s*"coral"\s*:\s*\{(\s*".*,\n)*(\s*)}"#)
                 .unwrap();
@@ -88,7 +92,7 @@ impl Template for Langchain {
         contents
     }
 
-    fn post_process(root: &Path, agent_name: &str) -> std::io::Result<()> {
+    fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
         let pyproject_path = root.join("pyproject.toml");
         let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
 
@@ -118,6 +122,22 @@ impl Template for Langchain {
             toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
 
         std::fs::write(pyproject_path, pyproject.to_string())?;
+
+        let dockerfile_path = root.join("Dockerfile");
+        let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
+
+        const NEEDLE: &'static str = "COPY --from=builder --chown=app:app /app/ /app/";
+        let off = dockerfile.find(NEEDLE).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "Could not find relevant line in Dockerfile",
+            )
+        })?;
+
+        dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
+
+        std::fs::write(dockerfile_path, dockerfile)?;
+
         Ok(())
     }
 }

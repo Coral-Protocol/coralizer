@@ -1,7 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Display,
     fs::{self, File},
+    hash::Hash,
     io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -66,7 +67,19 @@ impl Display for McpKind {
     }
 }
 
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Runtime {
+    Npx,
+}
+
 impl McpKind {
+    fn runtime(&self) -> Option<Runtime> {
+        match self {
+            McpKind::Npx => Some(Runtime::Npx),
+            McpKind::Stdio | McpKind::Sse => None,
+        }
+    }
     fn env_wizard() -> InquireResult<HashMap<String, String>> {
         let mut envs = HashMap::new();
         loop {
@@ -187,6 +200,7 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     };
 
     let mut mcps: Vec<Mcp> = vec![];
+    let mut runtimes: HashSet<Runtime> = HashSet::new();
 
     let mcp_kind = inquire::Select::new(
         "What kind of MCP server are you adding?",
@@ -194,17 +208,21 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     )
     .prompt()?;
 
+    if let Some(runtime) = mcp_kind.runtime() {
+        runtimes.insert(runtime);
+    }
     mcps.push(mcp_kind.wizard()?);
 
     match framework {
         Framework::Langchain => {
+            let templater = Arc::new(Langchain { runtimes });
             let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
                 .expect("cache dir");
 
-            let extracted_path = dirs.cache_dir().join("templates").join(Langchain::name());
+            let extracted_path = dirs.cache_dir().join("templates").join(templater.name());
             fs::create_dir_all(&extracted_path).unwrap();
 
-            let (url, artefact_name) = Langchain::artifact();
+            let (url, artefact_name) = templater.artifact();
             let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
             fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
 
@@ -238,6 +256,7 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             builder.build_parallel().run(|| {
                 let tx = tx.clone();
                 let agent_toml = agent_toml.clone();
+                let templater = templater.clone();
                 Box::new(move |entry| {
                     let entry = match entry {
                         Ok(entry) => entry,
@@ -285,10 +304,10 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         std::fs::create_dir_all(parent)?;
                     }
 
-                    match Langchain::is_templated_file(rel_path) {
+                    match templater.is_templated_file(rel_path) {
                         true => {
                             let contents = std::fs::read_to_string(&path)?;
-                            let contents = Langchain::template(&mcps, &contents);
+                            let contents = templater.template(&mcps, &contents);
 
                             std::fs::write(final_path, contents)?;
                         }
@@ -343,7 +362,7 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
 
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
-                Langchain::post_process(&params.path, &agent_name);
+                templater.post_process(&params.path, &agent_name);
 
                 Ok::<(), Box<std::io::Error>>(())
             });
