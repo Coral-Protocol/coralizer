@@ -211,10 +211,6 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             .as_str()
     ).expect("invalid json");
 
-    let mcp_kind = inquire::Select::new(
-        "What kind of MCP server are you adding?",
-        McpKind::iter_variants().collect_vec(),
-
     let description = mcp_servers.generate_description().await;
     let mcps: Vec<Mcp> = mcp_servers.into();
 
