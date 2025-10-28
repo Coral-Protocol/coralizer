@@ -171,14 +171,13 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             "'{}' already exists - continue & delete existing?",
             params.path.as_path().display()
         ))
-            .with_default(false)
-            .prompt()?
+        .with_default(false)
+        .prompt()?
         {
             println!("Cancelled.");
             return Ok(());
         }
-    }
-    else {
+    } else {
         fs::create_dir_all(&params.path)?;
     }
 
@@ -205,11 +204,17 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .prompt()?,
     };
 
-    let mcp_servers: McpServers = serde_json::from_str(
+    let mut mcp_servers: McpServers = serde_json::from_str(
         fs::read_to_string(params.mcp_servers_path)
             .unwrap()
-            .as_str()
-    ).expect("invalid json");
+            .as_str(),
+    )
+    .expect("invalid json");
+    mcp_servers
+        .servers
+        .values_mut()
+        .flat_map(|server| server.env.iter_mut().flat_map(|env| env.iter_mut()))
+        .for_each(|(k, v)| *v = k.clone());
 
     let description = mcp_servers.generate_description().await;
     let mcps: Vec<Mcp> = mcp_servers.into();
@@ -330,10 +335,12 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                     std::fs::read_to_string(&agent_toml_path)?.parse().unwrap();
 
                 // todo: alan (remove unwrap please, also, what happens if description set in template?...)
-                agent_toml.get_mut("agent").unwrap().as_table_mut().unwrap().insert(
-                    "description",
-                    description.into()
-                );
+                agent_toml
+                    .get_mut("agent")
+                    .unwrap()
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("description", description.into());
 
                 let Some(toml_agent_name) = agent_toml
                     .get_mut("agent")
