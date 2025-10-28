@@ -238,7 +238,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             let response = reqwest::get(url).await.unwrap().bytes().await.unwrap();
 
             let mut artefact = File::create(&artefact_path).unwrap();
-            artefact.write_all(&response);
+            artefact.write_all(&response).unwrap();
             drop(artefact);
 
             let mut artefact = File::open(&artefact_path).unwrap();
