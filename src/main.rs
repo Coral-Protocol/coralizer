@@ -379,7 +379,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
 
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
-                templater.post_process(&params.path, &agent_name);
+                templater.post_process(&params.path, &agent_name)?;
 
                 Ok::<(), Box<std::io::Error>>(())
             });
