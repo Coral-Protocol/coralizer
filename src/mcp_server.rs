@@ -27,15 +27,15 @@ use std::collections::HashMap;
 /// }```
 #[derive(Deserialize)]
 pub struct McpServers {
-    #[serde(rename="mcpServers")]
-    servers: HashMap<String, McpServer>,
+    #[serde(rename = "mcpServers")]
+    pub servers: HashMap<String, McpServer>,
 }
 
 #[derive(Deserialize)]
 pub struct McpServer {
-    command: String,
-    args: Vec<String>,
-    env: Option<HashMap<String, String>>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 impl Into<Vec<Mcp>> for McpServers {
@@ -61,35 +61,37 @@ impl Into<Mcp> for McpServer {
 impl McpServers {
     pub async fn generate_description(&self) -> String {
         let mut runner = McpRunner::new(Config {
-            mcp_servers: self.servers
+            mcp_servers: self
+                .servers
                 .iter()
                 .map(|(name, server)| {
                     println!("will run {} with args {:?}", server.command, server.args);
-                    (name.clone(), ServerConfig {
-                        /*
-                            😡
+                    (
+                        name.clone(),
+                        ServerConfig {
+                            /*
+                               😡
 
-                            Many places will present a JSON blob that the user can paste somewhere to get a server running;
-                            but these same places do not allow any OS specific quirks to be specified, and they often use hacky
-                            workarounds to like NPX to get things running.
+                               Many places will present a JSON blob that the user can paste somewhere to get a server running;
+                               but these same places do not allow any OS specific quirks to be specified, and they often use hacky
+                               workarounds to like NPX to get things running.
 
-                            The name of the NPX script under Windows is npx.cmd, the command would have to be "cmd /c npx" or similar
-                            to invoke it on Windows without needing to specify the extension explicitly.
-                         */
-                        command: if server.command.eq("npx") {
-                            if cfg!(windows) {
-                                "npx.cmd".to_string()
-                            }
-                            else {
-                                "npx".to_string()
-                            }
-                        }
-                        else {
-                            server.command.clone()
+                               The name of the NPX script under Windows is npx.cmd, the command would have to be "cmd /c npx" or similar
+                               to invoke it on Windows without needing to specify the extension explicitly.
+                            */
+                            command: if server.command.eq("npx") {
+                                if cfg!(windows) {
+                                    "npx.cmd".to_string()
+                                } else {
+                                    "npx".to_string()
+                                }
+                            } else {
+                                server.command.clone()
+                            },
+                            args: server.args.clone(),
+                            env: server.env.clone().unwrap_or_default(),
                         },
-                        args: server.args.clone(),
-                        env: server.env.clone().unwrap_or_default(),
-                    })
+                    )
                 })
                 .collect(),
             sse_proxy: None,
@@ -97,7 +99,10 @@ impl McpServers {
 
         let openai_client = openai::Client::from_env();
 
-        runner.start_all_servers().await.expect("failed to start servers");
+        runner
+            .start_all_servers()
+            .await
+            .expect("failed to start servers");
         let tools = runner.get_all_server_tools().await;
         let tool_str = tools
             .values()
@@ -125,7 +130,10 @@ impl McpServers {
             .await
             .expect("Failed to prompt GPT-4");
 
-        runner.stop_all_servers().await.expect("failed to stop servers");
+        runner
+            .stop_all_servers()
+            .await
+            .expect("failed to stop servers");
         response
     }
 }
