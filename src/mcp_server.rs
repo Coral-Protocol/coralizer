@@ -102,10 +102,7 @@ impl McpServers {
         let tool_str = tools
             .values()
             .flatten()
-            .flatten()
-            .into_iter()
-            .map(|t| serde_json::to_string(t))
-            .flatten()
+            .flat_map(serde_json::to_string)
             .join("\n\n");
 
         let gpt4 = openai_client
