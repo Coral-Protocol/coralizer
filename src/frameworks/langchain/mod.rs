@@ -21,8 +21,8 @@ impl Template for Langchain {
     }
     fn artifact(&self) -> (&'static str, &'static str) {
         (
-            "https://github.com/Coral-Protocol/langchain-agent/archive/fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
-            "fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
+            "https://github.com/Coral-Protocol/langchain-agent/archive/d77845581b94e17c39bfcf0f57c6faf89bdc90d2.zip",
+            "d77845581b94e17c39bfcf0f57c6faf89bdc90d2.zip",
         )
     }
     fn include_file(entry: &ignore::DirEntry) -> bool {
@@ -94,6 +94,7 @@ impl Template for Langchain {
 
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
         let pyproject_path = root.join("pyproject.toml");
+        println!("`pyproject.toml` fixup...");
         let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
 
         let Some(project_name) = pyproject
@@ -101,8 +102,7 @@ impl Template for Langchain {
             .and_then(|e| e.get_mut("name"))
             .and_then(|e| e.as_value_mut())
         else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "No project.name key found in pyproject.toml!",
             ));
         };
@@ -113,29 +113,28 @@ impl Template for Langchain {
             .and_then(|e| e.get_mut("description"))
             .and_then(|e| e.as_value_mut())
         else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "No project.name key found in pyproject.toml!",
             ));
         };
         *project_desc =
             toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
 
+        println!("Writing final 'pyproject.toml' to {pyproject_path:?}...");
         std::fs::write(pyproject_path, pyproject.to_string())?;
 
         let dockerfile_path = root.join("Dockerfile");
+        println!("'Dockerfile' fixup...");
         let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
 
-        const NEEDLE: &'static str = "COPY --from=builder --chown=app:app /app/ /app/";
-        let off = dockerfile.find(NEEDLE).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "Could not find relevant line in Dockerfile",
-            )
-        })?;
+        const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
+        let off = dockerfile
+            .find(NEEDLE)
+            .ok_or_else(|| io::Error::other("Could not find relevant line in Dockerfile"))?;
 
         dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
 
+        println!("Writing final 'Dockerfile' to {dockerfile_path:?}...");
         std::fs::write(dockerfile_path, dockerfile)?;
 
         Ok(())

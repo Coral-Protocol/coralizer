@@ -326,13 +326,18 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         }
                     }
                 }
-                let Some(agent_toml_path) = agent_toml.lock().unwrap().take() else {
+                let Some(agent_toml_path) = agent_toml
+                    .lock()
+                    .expect("agent toml path to not be poisoned")
+                    .take()
+                else {
                     eprintln!("No coral-agent.toml found in template source.");
                     return Ok(());
                 };
 
-                let mut agent_toml: DocumentMut =
-                    std::fs::read_to_string(&agent_toml_path)?.parse().unwrap();
+                let mut agent_toml: DocumentMut = std::fs::read_to_string(&agent_toml_path)?
+                    .parse()
+                    .expect("valid coral-agent.toml");
 
                 // todo: alan (remove unwrap please, also, what happens if description set in template?...)
                 agent_toml
@@ -377,9 +382,12 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         .expect("path to be in base"),
                 );
 
+                println!("Writing final coral-agent.toml to {final_toml:?}...");
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
+                println!("Framework specific post process...");
                 templater.post_process(&params.path, &agent_name)?;
+                println!("Done!");
 
                 Ok::<(), Box<std::io::Error>>(())
             });
