@@ -7,6 +7,7 @@ use inquire::{error::InquireResult, validator::ValueRequiredValidator};
 use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fmt::Display,
     fs::{self, File},
     hash::Hash,
@@ -311,6 +312,9 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 let pb = ProgressBar::new(10);
                 let file_count = rx.len();
                 let files = pb.wrap_iter(rx.iter());
+
+                let mut has_docker = false;
+
                 for path in files {
                     let rel_path = path
                         .strip_prefix(&extracted_path)
@@ -319,6 +323,10 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
 
                     if let Some(parent) = final_path.parent() {
                         std::fs::create_dir_all(parent)?;
+                    }
+
+                    if rel_path.file_name() == Some(OsStr::new("Dockerfile")) {
+                        has_docker = true;
                     }
 
                     match templater.is_templated_file(rel_path) {
@@ -393,7 +401,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
 
                 templater.post_process(&params.path, &agent_name)?;
 
-                if templater.runtimes.contains(&Runtime::Npx) {
+                if has_docker {
                     let image_name = inquire::Text::new("Name of Docker image")
                         .with_help_message(
                             "(the image name that would be used in a `docker run <IMAGE>`)",
