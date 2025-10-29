@@ -123,7 +123,7 @@ impl McpServers {
         let response = match env::var("SKIP_LLM").is_ok() {
             true => {
                 // TODO: ask for description
-                String::from("DUMMY DESCRIPTION")
+                String::from("CHANGE ME")
             }
             false => {
                 let gpt4 = openai_client
