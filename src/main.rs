@@ -410,7 +410,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 );
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
-                println!("Done!");
+                println!("✅ Coralizer complete!");
 
                 Ok::<(), Box<std::io::Error>>(())
             });
