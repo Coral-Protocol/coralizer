@@ -83,12 +83,6 @@ pub enum Runtime {
 }
 
 impl McpKind {
-    fn runtime(&self) -> Option<Runtime> {
-        match self {
-            McpKind::Npx => Some(Runtime::Npx),
-            McpKind::Stdio | McpKind::Sse => None,
-        }
-    }
     fn env_wizard() -> InquireResult<HashMap<String, String>> {
         let mut envs = HashMap::new();
         loop {
@@ -217,7 +211,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     let mcps: Vec<McpServer> = mcp_servers.into();
 
     // todo: alan what was the purpose of this...
-    let runtimes: HashSet<Runtime> = HashSet::from([Runtime::Npx]);
+    let runtimes: HashSet<Runtime> = mcps.iter().filter_map(|mcp| mcp.runtime()).collect();
 
     match framework {
         Framework::Langchain => {
@@ -267,7 +261,6 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             builder.build_parallel().run(|| {
                 let tx = tx.clone();
                 let agent_toml = agent_toml.clone();
-                let templater = templater.clone();
                 Box::new(move |entry| {
                     let entry = match entry {
                         Ok(entry) => entry,

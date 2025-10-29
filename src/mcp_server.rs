@@ -10,6 +10,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 
+use crate::Runtime;
+
 ///
 /// Follows this:
 /// todo: find an actual spec for this!!!!
@@ -51,6 +53,18 @@ pub enum McpServer {
 }
 
 impl McpServer {
+    pub fn runtime(&self) -> Option<Runtime> {
+        match self {
+            Self::Stdio { command, .. } => {
+                if command.contains("npx") {
+                    Some(Runtime::Npx)
+                } else {
+                    None
+                }
+            }
+            Self::Sse { .. } => None,
+        }
+    }
     pub fn options(&self) -> Option<Vec<String>> {
         Some(match self {
             Self::Stdio { env, .. } => env.as_ref()?.values().cloned().collect_vec(),
@@ -61,7 +75,7 @@ impl McpServer {
 
 impl From<McpServers> for Vec<McpServer> {
     fn from(val: McpServers) -> Self {
-        val.servers.into_values().map(Into::into).collect()
+        val.servers.into_values().collect()
     }
 }
 

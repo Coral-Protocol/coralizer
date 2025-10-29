@@ -5,7 +5,7 @@ use std::{fmt::Display, path::Path};
 mod langchain;
 pub use langchain::*;
 
-use crate::{languages::Language, mcp_server::McpServer};
+use crate::languages::Language;
 
 custom_derive! {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, clap::ValueEnum)]
