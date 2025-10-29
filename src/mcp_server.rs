@@ -36,9 +36,17 @@ pub struct McpServers {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "transport")]
 pub enum McpServer {
-    #[serde(rename = "streamableHttp")]
+    #[serde(rename = "sse")]
     Sse {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        headers: Option<HashMap<String, String>>,
+    },
+    #[serde(rename = "http")]
+    #[serde(alias = "streamableHttp")]
+    Http {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
@@ -62,13 +70,16 @@ impl McpServer {
                     None
                 }
             }
+            Self::Http { .. } => None,
             Self::Sse { .. } => None,
         }
     }
     pub fn options(&self) -> Option<Vec<String>> {
         Some(match self {
             Self::Stdio { env, .. } => env.as_ref()?.values().cloned().collect_vec(),
-            Self::Sse { headers, .. } => headers.as_ref()?.values().cloned().collect_vec(),
+            Self::Http { headers, .. } | Self::Sse { headers, .. } => {
+                headers.as_ref()?.values().cloned().collect_vec()
+            }
         })
     }
 }

@@ -197,7 +197,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .values_mut()
         .flat_map(|server| {
             let map = match server {
-                McpServer::Sse { headers, .. } => headers,
+                McpServer::Http { headers, .. } | McpServer::Sse { headers, .. } => headers,
                 McpServer::Stdio { env, .. } => env,
             };
             map.iter_mut().flat_map(|env| env.iter_mut())
@@ -208,14 +208,20 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     pb.enable_steady_tick(Duration::from_millis(300));
     let description = mcp_servers.generate_description(pb).await;
     println!("✅ {}", "Agent description generated".green());
-    let mcps: Vec<McpServer> = mcp_servers.into();
 
     // todo: alan what was the purpose of this...
-    let runtimes: HashSet<Runtime> = mcps.iter().filter_map(|mcp| mcp.runtime()).collect();
+    let runtimes: HashSet<Runtime> = mcp_servers
+        .servers
+        .values()
+        .filter_map(|mcp| mcp.runtime())
+        .collect();
 
     match framework {
         Framework::Langchain => {
-            let templater = Arc::new(Langchain { runtimes, mcps });
+            let templater = Arc::new(Langchain {
+                runtimes,
+                mcps: mcp_servers,
+            });
             let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
                 .expect("cache dir");
 
@@ -367,7 +373,8 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 let options = options.as_table_mut().expect("'options' key to be a table");
                 for opt in templater
                     .mcps
-                    .iter()
+                    .servers
+                    .values()
                     .filter_map(|mcp| mcp.options())
                     .flatten()
                 {

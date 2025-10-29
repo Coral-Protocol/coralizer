@@ -10,12 +10,12 @@ use toml_edit::{DocumentMut, Formatted};
 
 use crate::Runtime;
 use crate::frameworks::Template;
-use crate::mcp_server::McpServer;
+use crate::mcp_server::{McpServer, McpServers};
 
 #[derive(Clone)]
 pub struct Langchain {
     pub runtimes: HashSet<Runtime>,
-    pub mcps: Vec<McpServer>,
+    pub mcps: McpServers,
 }
 
 impl Template for Langchain {
@@ -55,11 +55,12 @@ impl Template for Langchain {
             let ind = " ".repeat(group.len());
             let mut s = String::new();
             writeln!(s, ",").unwrap();
-            for (i, mcp) in self.mcps.iter().enumerate() {
+            for (i, (mcp_name, mcp)) in self.mcps.servers.iter().enumerate() {
+                // TODO (alan): dedupe this
                 match mcp {
                     McpServer::Stdio { command, args, env } => {
                         let args = args.iter().map(|a| format!("\"{a}\"")).collect_vec();
-                        writeln!(s, r#"{ind}"TODO": {{"#).unwrap();
+                        writeln!(s, r#"{ind}"{mcp_name}": {{"#).unwrap();
                         writeln!(s, r#"{ind}    "transport": "stdio","#).unwrap();
                         writeln!(s, r#"{ind}    "command": "{command}","#).unwrap();
                         if let Some(env) = env
@@ -79,13 +80,44 @@ impl Template for Langchain {
                         }
                         writeln!(s, r#"{ind}    "args": [{}]"#, args.join(", ")).unwrap();
                         write!(s, r#"{ind}}}"#).unwrap();
-                        match i + 1 == self.mcps.len() {
+                        match i + 1 == self.mcps.servers.len() {
+                            true => writeln!(s),
+                            false => write!(s, ","),
+                        }
+                        .unwrap()
+                    }
+                    McpServer::Http { url, headers } | McpServer::Sse { url, headers } => {
+                        let transport = match mcp {
+                            McpServer::Http { .. } => "streamable_http",
+                            McpServer::Sse { .. } => "sse",
+                            _ => unreachable!(),
+                        };
+                        writeln!(s, r#"{ind}"{mcp_name}": {{"#).unwrap();
+                        writeln!(s, r#"{ind}    "transport": "{transport}","#).unwrap();
+                        write!(s, r#"{ind}    "url": "{url}""#).unwrap();
+                        if let Some(headers) = headers
+                            && !headers.is_empty()
+                        {
+                            writeln!(s, r#"{ind}    "headers": {{"#).unwrap();
+                            for (i, (header, opt)) in headers.iter().enumerate() {
+                                write!(s, r#"{ind}        "{header}": asserted_env("{opt}")"#)
+                                    .unwrap();
+                                match i + 1 == header.len() {
+                                    true => writeln!(s, ","),
+                                    false => writeln!(s),
+                                }
+                                .unwrap()
+                            }
+                            write!(s, r#"{ind}    }}"#).unwrap();
+                        }
+                        writeln!(s, ",").unwrap();
+                        write!(s, r#"{ind}}}"#).unwrap();
+                        match i + 1 == self.mcps.servers.len() {
                             true => write!(s, ","),
                             false => writeln!(s),
                         }
                         .unwrap()
                     }
-                    McpServer::Sse { .. } => todo!(),
                 }
             }
             contents.insert_str(group.end() + 1, &s);
