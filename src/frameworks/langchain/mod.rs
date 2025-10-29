@@ -80,11 +80,6 @@ impl Template for Langchain {
                         }
                         writeln!(s, r#"{ind}    "args": [{}]"#, args.join(", ")).unwrap();
                         write!(s, r#"{ind}}}"#).unwrap();
-                        match i + 1 == self.mcps.servers.len() {
-                            true => writeln!(s),
-                            false => write!(s, ","),
-                        }
-                        .unwrap()
                     }
                     McpServer::Http { url, headers } | McpServer::Sse { url, headers } => {
                         let transport = match mcp {
@@ -98,6 +93,7 @@ impl Template for Langchain {
                         if let Some(headers) = headers
                             && !headers.is_empty()
                         {
+                            writeln!(s, ",").unwrap();
                             writeln!(s, r#"{ind}    "headers": {{"#).unwrap();
                             for (i, (header, opt)) in headers.iter().enumerate() {
                                 write!(s, r#"{ind}        "{header}": asserted_env("{opt}")"#)
@@ -110,15 +106,15 @@ impl Template for Langchain {
                             }
                             write!(s, r#"{ind}    }}"#).unwrap();
                         }
-                        writeln!(s, ",").unwrap();
+                        writeln!(s).unwrap();
                         write!(s, r#"{ind}}}"#).unwrap();
-                        match i + 1 == self.mcps.servers.len() {
-                            true => write!(s, ","),
-                            false => writeln!(s),
-                        }
-                        .unwrap()
                     }
                 }
+                match i + 1 == self.mcps.servers.len() {
+                    true => write!(s, ","),
+                    false => writeln!(s),
+                }
+                .unwrap()
             }
             contents.insert_str(group.end() + 1, &s);
         } else {
