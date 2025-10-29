@@ -1,8 +1,7 @@
-use console::style;
+use colored::Colorize as _;
+use futures_util::future::join_all;
 use indicatif::ProgressBar;
 use itertools::Itertools;
-use mcp_runner::config::ServerConfig;
-use mcp_runner::{Config, McpRunner};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::openai;
@@ -11,6 +10,7 @@ use std::collections::HashMap;
 use std::env;
 
 use crate::Runtime;
+use crate::mcp_client::make_client;
 
 ///
 /// Follows this:
@@ -92,94 +92,64 @@ impl From<McpServers> for Vec<McpServer> {
 
 impl McpServers {
     pub async fn generate_description(&self, pb: ProgressBar) -> String {
-        if env::var("SKIP_LLM").is_ok() {
-            // TODO: ask for description
-            return String::from("DUMMY DESCRIPTION");
+        pb.set_message("Starting MCP server(s)");
+        let mut tools = vec![];
+        let mut clients = vec![];
+        for (name, server) in self.servers.iter() {
+            match make_client(server).await {
+                Ok(client) => {
+                    match client.list_all_tools().await {
+                        Ok(t) => tools.extend(t),
+                        Err(e) => {
+                            eprintln!("Failed to list tools from MCP '{name}' - {e:?}");
+                        }
+                    }
+                    clients.push(client);
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to '{name}' - {e:?}");
+                }
+            }
         }
-        let mut runner = McpRunner::new(Config {
-            mcp_servers: self
-                .servers
-                .iter()
-                .filter_map(|(name, server)| {
-                    let McpServer::Stdio { command, args, env } = server else {
-                        return None;
-                    };
-                    println!(
-                        "{}",
-                        style(format!("> will run {} with args {:?}", command, args))
-                            .dim()
-                            .black()
-                    );
-                    Some((
-                        name.clone(),
-                        ServerConfig {
-                            /*
-                               😡
+        let close_all = clients.into_iter().map(|client| client.cancel());
+        let close_all = tokio::spawn(join_all(close_all));
 
-                               Many places will present a JSON blob that the user can paste somewhere to get a server running;
-                               but these same places do not allow any OS specific quirks to be specified, and they often use hacky
-                               workarounds to like NPX to get things running.
-
-                               The name of the NPX script under Windows is npx.cmd, the command would have to be "cmd /c npx" or similar
-                               to invoke it on Windows without needing to specify the extension explicitly.
-                            */
-                            command: if command.eq("npx") {
-                                if cfg!(windows) {
-                                    "npx.cmd".to_string()
-                                } else {
-                                    "npx".to_string()
-                                }
-                            } else {
-                                command.clone()
-                            },
-                            args: args.clone(),
-                            env: env.clone().unwrap_or_default(),
-                        },
-                    ))
-                })
-                .collect(),
-            sse_proxy: None,
-        });
+        println!("✅ {}", format!("Found {} tools.", tools.len()).green());
 
         let openai_client = openai::Client::from_env();
 
-        pb.set_message("Starting MCP server(s)");
-        runner
-            .start_all_servers()
-            .await
-            .expect("failed to start servers");
-        let tools = runner.get_all_server_tools().await;
-        let tool_str = tools
-            .values()
-            .flatten()
-            .flat_map(serde_json::to_string)
-            .join("\n\n");
+        let tool_str = tools.iter().flat_map(serde_json::to_string).join("\n\n");
 
-        let gpt4 = openai_client
-            .agent("gpt-4")
-            .preamble("You are a helpful assistant.")
-            .build();
+        let response = match env::var("SKIP_LLM").is_ok() {
+            true => {
+                // TODO: ask for description
+                String::from("DUMMY DESCRIPTION")
+            }
+            false => {
+                let gpt4 = openai_client
+                    .agent("gpt-4")
+                    .preamble("You are a helpful assistant.")
+                    .build();
 
-        pb.set_message("Generating agent description...");
-        // Prompt the model and print its response
-        let response = gpt4
-            .prompt(format!(r#"
-            We are making an agent with access to the the following tooling:
-            # start of tooling
-            {tool_str}
-            # end of tooling
+                pb.set_message("Generating agent description...");
+                gpt4
+                    .prompt(
+                        format!(r#"
+We are making an agent with access to the the following tooling:
+# start of tooling
+{tool_str}
+# end of tooling
 
-            This agent is being generated around this tooling to represent its capabilities and responsibilities as an agent to other agents.
-            Other agents, as well as human developers will use the agent's description to determine whether it is relevant to communicate with and use.
+This agent is being generated around this tooling to represent its capabilities and responsibilities as an agent to other agents.
+Other agents, as well as human developers will use the agent's description to determine whether it is relevant to communicate with and use.
 
-            With these tools in mind, generate a short description (10 - 50 words) that describes the agent's capabilities and responsibilities."#))
-            .await
-            .expect("Failed to prompt GPT-4");
+With these tools in mind, generate a short description (10 - 50 words) that describes the agent's capabilities and responsibilities."#).trim())
+                    .await
+                    .expect("Failed to prompt GPT-4")
+            }
+        };
 
-        runner
-            .stop_all_servers()
-            .await
-            .expect("failed to stop servers");
+        let _ = close_all.await;
         response
     }
 }

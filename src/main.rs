@@ -42,6 +42,7 @@ pub struct McpParams {
 }
 
 pub mod frameworks;
+pub mod mcp_client;
 pub mod mcp_server;
 
 pub mod languages {
