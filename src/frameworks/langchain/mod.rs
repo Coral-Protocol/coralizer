@@ -8,12 +8,14 @@ use itertools::Itertools;
 use regex::Regex;
 use toml_edit::{DocumentMut, Formatted};
 
+use crate::Runtime;
 use crate::frameworks::Template;
-use crate::{Mcp, Runtime};
+use crate::mcp_server::McpServer;
 
 #[derive(Clone)]
 pub struct Langchain {
     pub runtimes: HashSet<Runtime>,
+    pub mcps: Vec<McpServer>,
 }
 
 impl Template for Langchain {
@@ -43,7 +45,7 @@ impl Template for Langchain {
         }
         false
     }
-    fn template(&self, mcps: &[Mcp], contents: &str) -> String {
+    fn template(&self, contents: &str) -> String {
         let mcp_client_re =
             Regex::new(r#"MultiServerMCPClient\s*\(\s*connections\s*=\s*\{\s*"coral"\s*:\s*\{(\s*".*,\n)*(\s*)}"#)
                 .unwrap();
@@ -53,9 +55,9 @@ impl Template for Langchain {
             let ind = " ".repeat(group.len());
             let mut s = String::new();
             writeln!(s, ",").unwrap();
-            for (i, mcp) in mcps.iter().enumerate() {
+            for (i, mcp) in self.mcps.iter().enumerate() {
                 match mcp {
-                    Mcp::Stdio { command, args, env } => {
+                    McpServer::Stdio { command, args, env } => {
                         let args = args.iter().map(|a| format!("\"{a}\"")).collect_vec();
                         writeln!(s, r#"{ind}"TODO": {{"#).unwrap();
                         writeln!(s, r#"{ind}    "transport": "stdio","#).unwrap();
@@ -77,13 +79,13 @@ impl Template for Langchain {
                         }
                         writeln!(s, r#"{ind}    "args": [{}]"#, args.join(", ")).unwrap();
                         write!(s, r#"{ind}}}"#).unwrap();
-                        match i + 1 == mcps.len() {
+                        match i + 1 == self.mcps.len() {
                             true => write!(s, ","),
                             false => writeln!(s),
                         }
                         .unwrap()
                     }
-                    Mcp::Sse {} => todo!(),
+                    McpServer::Sse { .. } => todo!(),
                 }
             }
             contents.insert_str(group.end() + 1, &s);
@@ -127,22 +129,25 @@ impl Template for Langchain {
         );
         std::fs::write(pyproject_path, pyproject.to_string())?;
 
-        let dockerfile_path = root.join("Dockerfile");
-        print!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
-        let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
+        if self.runtimes.contains(&Runtime::Npx) {
+            print!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
 
-        const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
-        let off = dockerfile
-            .find(NEEDLE)
-            .ok_or_else(|| io::Error::other("Could not find relevant line in Dockerfile"))?;
+            let dockerfile_path = root.join("Dockerfile");
+            let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
 
-        dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
+            const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
+            let off = dockerfile
+                .find(NEEDLE)
+                .ok_or_else(|| io::Error::other("Could not find relevant line in Dockerfile"))?;
 
-        println!(
-            " -> {}",
-            style(format!("'{}'", dockerfile_path.display())).blue()
-        );
-        std::fs::write(dockerfile_path, dockerfile)?;
+            dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
+
+            println!(
+                " -> {}",
+                style(format!("'{}'", dockerfile_path.display())).blue()
+            );
+            std::fs::write(dockerfile_path, dockerfile)?;
+        }
 
         Ok(())
     }

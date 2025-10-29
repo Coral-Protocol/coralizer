@@ -5,7 +5,7 @@ use std::{fmt::Display, path::Path};
 mod langchain;
 pub use langchain::*;
 
-use crate::{languages::Language, Mcp};
+use crate::{languages::Language, mcp_server::McpServer};
 
 custom_derive! {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, clap::ValueEnum)]
@@ -51,6 +51,6 @@ pub trait Template {
         let _ = path;
         true
     }
-    fn template(&self, mcps: &[Mcp], contents: &str) -> String;
+    fn template(&self, contents: &str) -> String;
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()>;
 }

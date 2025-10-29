@@ -1,4 +1,3 @@
-use crate::Mcp;
 use console::style;
 use indicatif::ProgressBar;
 use itertools::Itertools;
@@ -28,32 +27,41 @@ use std::env;
 ///     }
 ///   }
 /// }```
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct McpServers {
     #[serde(rename = "mcpServers")]
     pub servers: HashMap<String, McpServer>,
 }
 
-#[derive(Deserialize)]
-pub struct McpServer {
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Option<HashMap<String, String>>,
+#[derive(Debug, Clone, Deserialize)]
+pub enum McpServer {
+    #[serde(rename = "streamableHttp")]
+    Sse {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        headers: Option<HashMap<String, String>>,
+    },
+    #[serde(untagged)]
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        env: Option<HashMap<String, String>>,
+    },
 }
 
-impl From<McpServers> for Vec<Mcp> {
-    fn from(val: McpServers) -> Self {
-        val.servers.into_values().map(Into::into).collect()
+impl McpServer {
+    pub fn options(&self) -> Option<Vec<String>> {
+        Some(match self {
+            Self::Stdio { env, .. } => env.as_ref()?.values().cloned().collect_vec(),
+            Self::Sse { headers, .. } => headers.as_ref()?.values().cloned().collect_vec(),
+        })
     }
 }
 
-impl From<McpServer> for Mcp {
-    fn from(val: McpServer) -> Self {
-        Mcp::Stdio {
-            command: val.command,
-            args: val.args,
-            env: val.env,
-        }
+impl From<McpServers> for Vec<McpServer> {
+    fn from(val: McpServers) -> Self {
+        val.servers.into_values().map(Into::into).collect()
     }
 }
 
@@ -67,17 +75,17 @@ impl McpServers {
             mcp_servers: self
                 .servers
                 .iter()
-                .map(|(name, server)| {
+                .filter_map(|(name, server)| {
+                    let McpServer::Stdio { command, args, env } = server else {
+                        return None;
+                    };
                     println!(
                         "{}",
-                        style(format!(
-                            "> will run {} with args {:?}",
-                            server.command, server.args
-                        ))
-                        .dim()
-                        .black()
+                        style(format!("> will run {} with args {:?}", command, args))
+                            .dim()
+                            .black()
                     );
-                    (
+                    Some((
                         name.clone(),
                         ServerConfig {
                             /*
@@ -90,19 +98,19 @@ impl McpServers {
                                The name of the NPX script under Windows is npx.cmd, the command would have to be "cmd /c npx" or similar
                                to invoke it on Windows without needing to specify the extension explicitly.
                             */
-                            command: if server.command.eq("npx") {
+                            command: if command.eq("npx") {
                                 if cfg!(windows) {
                                     "npx.cmd".to_string()
                                 } else {
                                     "npx".to_string()
                                 }
                             } else {
-                                server.command.clone()
+                                command.clone()
                             },
-                            args: server.args.clone(),
-                            env: server.env.clone().unwrap_or_default(),
+                            args: args.clone(),
+                            env: env.clone().unwrap_or_default(),
                         },
-                    )
+                    ))
                 })
                 .collect(),
             sse_proxy: None,

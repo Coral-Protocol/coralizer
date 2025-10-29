@@ -15,11 +15,14 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use toml_edit::{DocumentMut, Formatted, InlineTable, TableLike};
+use toml_edit::{DocumentMut, Formatted, InlineTable, table, value};
 use zip::read::root_dir_common_filter;
 
-use crate::frameworks::{Framework, Langchain, Template};
 use crate::mcp_server::McpServers;
+use crate::{
+    frameworks::{Framework, Langchain, Template},
+    mcp_server::McpServer,
+};
 use custom_derive::custom_derive;
 use enum_derive::*;
 
@@ -109,7 +112,7 @@ impl McpKind {
         }
         Ok(envs)
     }
-    pub fn wizard(self) -> InquireResult<Mcp> {
+    pub fn wizard(self) -> InquireResult<McpServer> {
         Ok(match self {
             McpKind::Npx => {
                 let package = inquire::Text::new("Name of the npm package (e.g '@org/mcp-server')")
@@ -124,7 +127,7 @@ impl McpKind {
                         .prompt()?;
                 args.extend(extra_args.split_whitespace().map(|s| s.to_owned()));
 
-                Mcp::Stdio {
+                McpServer::Stdio {
                     command: "npx".to_string(),
                     args,
                     env: Some(envs),
@@ -141,31 +144,10 @@ impl McpKind {
 
                 let env = Some(Self::env_wizard()?);
 
-                Mcp::Stdio { command, args, env }
+                McpServer::Stdio { command, args, env }
             }
             McpKind::Sse => todo!(),
         })
-    }
-}
-
-pub enum Mcp {
-    Stdio {
-        command: String,
-        args: Vec<String>,
-        env: Option<HashMap<String, String>>,
-    },
-    Sse {},
-}
-
-impl Mcp {
-    pub fn options(&self) -> Vec<String> {
-        match self {
-            Mcp::Stdio { env, .. } => env
-                .as_ref()
-                .map(|e| e.values().cloned().collect_vec())
-                .unwrap_or_default(),
-            Mcp::Sse {} => todo!(),
-        }
     }
 }
 
@@ -219,21 +201,27 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     mcp_servers
         .servers
         .values_mut()
-        .flat_map(|server| server.env.iter_mut().flat_map(|env| env.iter_mut()))
+        .flat_map(|server| {
+            let map = match server {
+                McpServer::Sse { headers, .. } => headers,
+                McpServer::Stdio { env, .. } => env,
+            };
+            map.iter_mut().flat_map(|env| env.iter_mut())
+        })
         .for_each(|(k, v)| *v = k.clone());
 
     let pb = ProgressBar::new_spinner();
     pb.enable_steady_tick(Duration::from_millis(300));
     let description = mcp_servers.generate_description(pb).await;
     println!("✅ {}", "Agent description generated".green());
-    let mcps: Vec<Mcp> = mcp_servers.into();
+    let mcps: Vec<McpServer> = mcp_servers.into();
 
     // todo: alan what was the purpose of this...
     let runtimes: HashSet<Runtime> = HashSet::from([Runtime::Npx]);
 
     match framework {
         Framework::Langchain => {
-            let templater = Arc::new(Langchain { runtimes });
+            let templater = Arc::new(Langchain { runtimes, mcps });
             let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
                 .expect("cache dir");
 
@@ -336,7 +324,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                     match templater.is_templated_file(rel_path) {
                         true => {
                             let contents = std::fs::read_to_string(&path)?;
-                            let contents = templater.template(&mcps, &contents);
+                            let contents = templater.template(&contents);
 
                             std::fs::write(final_path, contents)?;
                         }
@@ -384,7 +372,12 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                     return Ok(());
                 };
                 let options = options.as_table_mut().expect("'options' key to be a table");
-                for opt in mcps.iter().flat_map(|mcp| mcp.options()) {
+                for opt in templater
+                    .mcps
+                    .iter()
+                    .filter_map(|mcp| mcp.options())
+                    .flatten()
+                {
                     let mut table = InlineTable::new();
                     table.insert(
                         "type",
@@ -395,6 +388,20 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         &opt,
                         toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
                     );
+                }
+
+                templater.post_process(&params.path, &agent_name)?;
+
+                if templater.runtimes.contains(&Runtime::Npx) {
+                    let image_name = inquire::Text::new("Name of Docker image")
+                        .with_help_message(
+                            "(the image name that would be used in a `docker run <IMAGE>`)",
+                        )
+                        .with_validator(ValueRequiredValidator::default())
+                        .prompt()
+                        .unwrap();
+                    agent_toml["runtimes"]["docker"] = table();
+                    agent_toml["runtimes"]["docker"]["image"] = value(image_name);
                 }
 
                 let final_toml = params.path.join(
@@ -410,7 +417,6 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 );
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
-                templater.post_process(&params.path, &agent_name)?;
                 println!("Done!");
 
                 Ok::<(), Box<std::io::Error>>(())
