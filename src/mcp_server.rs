@@ -1,4 +1,6 @@
 use crate::Mcp;
+use console::style;
+use indicatif::ProgressBar;
 use itertools::Itertools;
 use mcp_runner::config::ServerConfig;
 use mcp_runner::{Config, McpRunner};
@@ -7,6 +9,7 @@ use rig::completion::Prompt;
 use rig::providers::openai;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
 
 ///
 /// Follows this:
@@ -38,34 +41,42 @@ pub struct McpServer {
     pub env: Option<HashMap<String, String>>,
 }
 
-impl Into<Vec<Mcp>> for McpServers {
-    fn into(self) -> Vec<Mcp> {
-        self.servers
-            .into_values()
-            .into_iter()
-            .map(Into::into)
-            .collect()
+impl From<McpServers> for Vec<Mcp> {
+    fn from(val: McpServers) -> Self {
+        val.servers.into_values().map(Into::into).collect()
     }
 }
 
-impl Into<Mcp> for McpServer {
-    fn into(self) -> Mcp {
+impl From<McpServer> for Mcp {
+    fn from(val: McpServer) -> Self {
         Mcp::Stdio {
-            command: self.command,
-            args: self.args,
-            env: self.env,
+            command: val.command,
+            args: val.args,
+            env: val.env,
         }
     }
 }
 
 impl McpServers {
-    pub async fn generate_description(&self) -> String {
+    pub async fn generate_description(&self, pb: ProgressBar) -> String {
+        if env::var("SKIP_LLM").is_ok() {
+            // TODO: ask for description
+            return String::from("DUMMY DESCRIPTION");
+        }
         let mut runner = McpRunner::new(Config {
             mcp_servers: self
                 .servers
                 .iter()
                 .map(|(name, server)| {
-                    println!("will run {} with args {:?}", server.command, server.args);
+                    println!(
+                        "{}",
+                        style(format!(
+                            "> will run {} with args {:?}",
+                            server.command, server.args
+                        ))
+                        .dim()
+                        .black()
+                    );
                     (
                         name.clone(),
                         ServerConfig {
@@ -99,6 +110,7 @@ impl McpServers {
 
         let openai_client = openai::Client::from_env();
 
+        pb.set_message("Starting MCP server(s)");
         runner
             .start_all_servers()
             .await
@@ -115,6 +127,7 @@ impl McpServers {
             .preamble("You are a helpful assistant.")
             .build();
 
+        pb.set_message("Generating agent description...");
         // Prompt the model and print its response
         let response = gpt4
             .prompt(format!(r#"

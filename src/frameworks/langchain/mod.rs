@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 
+use console::style;
 use itertools::Itertools;
 use regex::Regex;
 use toml_edit::{DocumentMut, Formatted};
@@ -94,7 +95,7 @@ impl Template for Langchain {
 
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
         let pyproject_path = root.join("pyproject.toml");
-        println!("`pyproject.toml` fixup...");
+        print!("🔧 {:>18} fixup", style("'pyproject.toml'").blue());
         let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
 
         let Some(project_name) = pyproject
@@ -120,11 +121,14 @@ impl Template for Langchain {
         *project_desc =
             toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
 
-        println!("Writing final 'pyproject.toml' to {pyproject_path:?}...");
+        println!(
+            " -> {}",
+            style(format!("'{}'", pyproject_path.display())).blue()
+        );
         std::fs::write(pyproject_path, pyproject.to_string())?;
 
         let dockerfile_path = root.join("Dockerfile");
-        println!("'Dockerfile' fixup...");
+        print!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
         let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
 
         const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
@@ -134,7 +138,10 @@ impl Template for Langchain {
 
         dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
 
-        println!("Writing final 'Dockerfile' to {dockerfile_path:?}...");
+        println!(
+            " -> {}",
+            style(format!("'{}'", dockerfile_path.display())).blue()
+        );
         std::fs::write(dockerfile_path, dockerfile)?;
 
         Ok(())

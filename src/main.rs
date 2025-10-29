@@ -1,5 +1,8 @@
 use clap::Parser;
+use console::style;
+use futures_util::StreamExt as _;
 use ignore::{WalkBuilder, WalkState};
+use indicatif::ProgressBar;
 use inquire::{error::InquireResult, validator::ValueRequiredValidator};
 use itertools::Itertools;
 use std::{
@@ -10,6 +13,7 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use toml_edit::{DocumentMut, Formatted, InlineTable, TableLike};
 use zip::read::root_dir_common_filter;
@@ -165,16 +169,18 @@ impl Mcp {
     }
 }
 
+use colored::Colorize;
+
 async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     if fs::exists(&params.path).unwrap() {
         if !inquire::Confirm::new(&format!(
-            "'{}' already exists - continue & delete existing?",
-            params.path.as_path().display()
+            "Directory {} already exists - continue & delete existing?",
+            format!("'{}'", params.path.as_path().display()).blue()
         ))
         .with_default(false)
         .prompt()?
         {
-            println!("Cancelled.");
+            println!("{} {}", ">".green(), "Cancelled.".red());
             return Ok(());
         }
     } else {
@@ -216,7 +222,10 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .flat_map(|server| server.env.iter_mut().flat_map(|env| env.iter_mut()))
         .for_each(|(k, v)| *v = k.clone());
 
-    let description = mcp_servers.generate_description().await;
+    let pb = ProgressBar::new_spinner();
+    pb.enable_steady_tick(Duration::from_millis(300));
+    let description = mcp_servers.generate_description(pb).await;
+    println!("✅ {}", "Agent description generated".green());
     let mcps: Vec<Mcp> = mcp_servers.into();
 
     // todo: alan what was the purpose of this...
@@ -235,13 +244,18 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
             fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
 
-            let response = reqwest::get(url).await.unwrap().bytes().await.unwrap();
+            let pb = ProgressBar::new(10).with_message("Fetching template...");
+            let mut response = pb.wrap_stream(reqwest::get(url).await.unwrap().bytes_stream());
 
             let mut artefact = File::create(&artefact_path).unwrap();
-            artefact.write_all(&response).unwrap();
+
+            while let Some(item) = response.next().await {
+                let chunk = item.unwrap();
+                artefact.write_all(&chunk).unwrap();
+            }
             drop(artefact);
 
-            let mut artefact = File::open(&artefact_path).unwrap();
+            let artefact = File::open(&artefact_path).unwrap();
             let mut archive = zip::ZipArchive::new(artefact).unwrap();
             archive
                 .extract_unwrapped_root_dir(&extracted_path, root_dir_common_filter)
@@ -270,12 +284,15 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                     let entry = match entry {
                         Ok(entry) => entry,
                         Err(e) => {
-                            eprintln!("Error reading file - {e:?}");
+                            eprintln!(
+                                "{}",
+                                style(format!("⚠️: error reading file - {e:?}")).yellow()
+                            );
                             return WalkState::Continue;
                         }
                     };
                     let path = entry.path();
-                    println!("{}", path.display());
+                    // println!("{}", path.display());
 
                     if !path.is_file() {
                         return WalkState::Continue;
@@ -289,11 +306,11 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                             .replace(path.to_path_buf())
                             .is_some()
                     {
-                        eprintln!("Warning: found multiple coral-agent.toml's?")
+                        eprintln!("{}", "⚠️: found multiple coral-agent.toml's?".yellow())
                     }
 
                     if let Err(e) = tx.send(path.to_owned()) {
-                        eprintln!("thread: {e:?}");
+                        eprintln!("{}", style(format!("thread: {e:?}")).red());
                         return WalkState::Quit;
                     }
                     WalkState::Continue
@@ -303,7 +320,10 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             drop(tx);
 
             let handle = std::thread::spawn(move || {
-                while let Ok(path) = rx.recv() {
+                let pb = ProgressBar::new(10);
+                let file_count = rx.len();
+                let files = pb.wrap_iter(rx.iter());
+                for path in files {
                     let rel_path = path
                         .strip_prefix(&extracted_path)
                         .expect("path to be in base");
@@ -326,6 +346,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         }
                     }
                 }
+                println!("✅ {}", format!("Processed {file_count} files.").green());
                 let Some(agent_toml_path) = agent_toml
                     .lock()
                     .expect("agent toml path to not be poisoned")
@@ -382,15 +403,20 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                         .expect("path to be in base"),
                 );
 
-                println!("Writing final coral-agent.toml to {final_toml:?}...");
+                println!(
+                    "🔧 {} fixup -> {}...",
+                    "'coral-agent.toml'".blue(),
+                    format!("'{}'", final_toml.display()).blue()
+                );
                 std::fs::write(final_toml, agent_toml.to_string())?;
 
-                println!("Framework specific post process...");
                 templater.post_process(&params.path, &agent_name)?;
                 println!("Done!");
 
                 Ok::<(), Box<std::io::Error>>(())
             });
+
+            // NOTE: don't print to stdout/err before thread closes to prevent garbage
             if let Err(e) = handle.join().expect("couldn't join on templating thread") {
                 eprintln!("Templating failed - {e:?}");
                 return Ok(());
