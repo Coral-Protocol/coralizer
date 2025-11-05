@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use toml_edit::{DocumentMut, Formatted, InlineTable, table, value};
+use toml_edit::{DocumentMut, table, value};
 use zip::read::root_dir_common_filter;
 
 use crate::{edit::edit_file_str, frameworks::CoralRs, mcp_server::McpServers};
@@ -353,37 +353,14 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             }
         }
         println!("✅ {}", format!("Processed {file_count} files.").green());
-        let Some(agent_toml_path) = agent_toml
-            .lock()
-            .expect("agent toml path to not be poisoned")
-            .take()
-        else {
-            eprintln!("No coral-agent.toml found in template source.");
-            return Ok(());
-        };
 
-        edit_file_str(&agent_toml_path, move |contents| {
+        edit_file_str(params.path.join("coral-agent.toml"), move |contents| {
             let mut agent_toml: DocumentMut = contents.parse().expect("valid coral-agent.toml");
 
-            // todo: alan (remove unwrap please, also, what happens if description set in template?...)
-            agent_toml
-                .get_mut("agent")
-                .unwrap()
-                .as_table_mut()
-                .unwrap()
-                .insert("description", description.into());
-
-            let Some(toml_agent_name) = agent_toml
-                .get_mut("agent")
-                .and_then(|agent| agent.get_mut("name"))
-                .and_then(|name| name.as_value_mut())
-            else {
-                return Err(io::Error::other(
-                    "No agent.name key found in coral-agent.toml!",
-                ));
-            };
-
-            *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+            // NOTE: implicit assumption that all of our templates will have an agent table already
+            // defined
+            agent_toml["agent"]["name"] = value(agent_name.clone());
+            agent_toml["agent"]["description"] = value(description);
 
             let Some(options) = agent_toml.get_mut("options") else {
                 return Err(io::Error::other(
@@ -397,16 +374,11 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
                 .filter_map(|mcp| mcp.options())
                 .flatten()
             {
-                let mut table = InlineTable::new();
-                table.insert(
-                    "type",
-                    toml_edit::Value::String(Formatted::new("string".into())),
-                );
-                table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
-                options.insert(
-                    &opt,
-                    toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
-                );
+                options[&opt]["type"] = "string".into();
+                options[&opt]["required"] = true.into();
+                if let Some(t) = options[&opt].as_inline_table_mut() {
+                    t.fmt()
+                }
             }
 
             templater.post_process(&params.path, &agent_name)?;
