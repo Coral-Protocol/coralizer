@@ -11,7 +11,7 @@ use std::{
     fmt::Display,
     fs::{self, File},
     hash::Hash,
-    io::Write,
+    io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -19,7 +19,7 @@ use std::{
 use toml_edit::{DocumentMut, Formatted, InlineTable, table, value};
 use zip::read::root_dir_common_filter;
 
-use crate::{frameworks::CoralRs, mcp_server::McpServers};
+use crate::{edit::edit_file_str, frameworks::CoralRs, mcp_server::McpServers};
 use crate::{
     frameworks::{Framework, Langchain, Template},
     mcp_server::McpServer,
@@ -42,6 +42,7 @@ pub struct McpParams {
     pub name: Option<String>,
 }
 
+pub mod edit;
 pub mod frameworks;
 pub mod mcp_client;
 pub mod mcp_server;
@@ -361,76 +362,76 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             return Ok(());
         };
 
-        let mut agent_toml: DocumentMut = std::fs::read_to_string(&agent_toml_path)?
-            .parse()
-            .expect("valid coral-agent.toml");
+        edit_file_str(&agent_toml_path, move |contents| {
+            let mut agent_toml: DocumentMut = contents.parse().expect("valid coral-agent.toml");
 
-        // todo: alan (remove unwrap please, also, what happens if description set in template?...)
-        agent_toml
-            .get_mut("agent")
-            .unwrap()
-            .as_table_mut()
-            .unwrap()
-            .insert("description", description.into());
+            // todo: alan (remove unwrap please, also, what happens if description set in template?...)
+            agent_toml
+                .get_mut("agent")
+                .unwrap()
+                .as_table_mut()
+                .unwrap()
+                .insert("description", description.into());
 
-        let Some(toml_agent_name) = agent_toml
-            .get_mut("agent")
-            .and_then(|agent| agent.get_mut("name"))
-            .and_then(|name| name.as_value_mut())
-        else {
-            eprintln!("No agent.name key found in coral-agent.toml!");
-            return Ok(());
-        };
+            let Some(toml_agent_name) = agent_toml
+                .get_mut("agent")
+                .and_then(|agent| agent.get_mut("name"))
+                .and_then(|name| name.as_value_mut())
+            else {
+                return Err(io::Error::other(
+                    "No agent.name key found in coral-agent.toml!",
+                ));
+            };
 
-        *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+            *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
 
-        let Some(options) = agent_toml.get_mut("options") else {
-            eprintln!("No options table found in coral-agent.toml!");
-            return Ok(());
-        };
-        let options = options.as_table_mut().expect("'options' key to be a table");
-        for opt in mcps
-            .servers
-            .values()
-            .filter_map(|mcp| mcp.options())
-            .flatten()
-        {
-            let mut table = InlineTable::new();
-            table.insert(
-                "type",
-                toml_edit::Value::String(Formatted::new("string".into())),
-            );
-            table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
-            options.insert(
-                &opt,
-                toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
-            );
-        }
+            let Some(options) = agent_toml.get_mut("options") else {
+                return Err(io::Error::other(
+                    "No options table found in coral-agent.toml!",
+                ));
+            };
+            let options = options.as_table_mut().expect("'options' key to be a table");
+            for opt in mcps
+                .servers
+                .values()
+                .filter_map(|mcp| mcp.options())
+                .flatten()
+            {
+                let mut table = InlineTable::new();
+                table.insert(
+                    "type",
+                    toml_edit::Value::String(Formatted::new("string".into())),
+                );
+                table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
+                options.insert(
+                    &opt,
+                    toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
+                );
+            }
 
-        templater.post_process(&params.path, &agent_name)?;
+            templater.post_process(&params.path, &agent_name)?;
 
-        if has_docker {
-            let image_name = inquire::Text::new("Name of Docker image")
-                .with_help_message("(the image name that would be used in a `docker run <IMAGE>`)")
-                .with_validator(ValueRequiredValidator::default())
-                .prompt()
-                .unwrap();
-            agent_toml["runtimes"]["docker"] = table();
-            agent_toml["runtimes"]["docker"]["image"] = value(image_name);
-        }
+            if has_docker {
+                let image_name = inquire::Text::new("Name of Docker image")
+                    .with_help_message(
+                        "(the image name that would be used in a `docker run <IMAGE>`)",
+                    )
+                    .with_validator(ValueRequiredValidator::default())
+                    .prompt()
+                    .unwrap();
+                agent_toml["runtimes"]["docker"] = table();
+                agent_toml["runtimes"]["docker"]["image"] = value(image_name);
+            }
 
-        let final_toml = params.path.join(
-            agent_toml_path
-                .strip_prefix(&extracted_path)
-                .expect("path to be in base"),
-        );
+            Ok::<_, io::Error>(agent_toml.to_string())
+        })?;
 
-        println!(
-            "🔧 {} fixup -> {}...",
-            "'coral-agent.toml'".blue(),
-            format!("'{}'", final_toml.display()).blue()
-        );
-        std::fs::write(final_toml, agent_toml.to_string())?;
+        // println!(
+        //     "🔧 {} fixup -> {}...",
+        //     "'coral-agent.toml'".blue(),
+        //     format!("'{}'", final_toml.display()).blue()
+        // );
+        // std::fs::write(final_toml, agent_toml.to_string())?;
 
         println!("✅ Coralizer complete!");
 

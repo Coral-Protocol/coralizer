@@ -10,6 +10,7 @@ use regex::Regex;
 use toml_edit::{DocumentMut, Formatted};
 
 use crate::Runtime;
+use crate::edit::edit_file_str;
 use crate::frameworks::Template;
 use crate::mcp_server::{McpServer, McpServers};
 
@@ -125,57 +126,45 @@ impl Template for Langchain {
     }
 
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
-        let pyproject_path = root.join("pyproject.toml");
         print!("🔧 {:>18} fixup", style("'pyproject.toml'").blue());
-        let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
+        edit_file_str(root.join("pyproject.toml"), |contents| {
+            let mut pyproject: DocumentMut = contents.parse().unwrap();
+            let Some(project_name) = pyproject
+                .get_mut("project")
+                .and_then(|e| e.get_mut("name"))
+                .and_then(|e| e.as_value_mut())
+            else {
+                return Err(io::Error::other(
+                    "No project.name key found in pyproject.toml!",
+                ));
+            };
+            *project_name = toml_edit::Value::String(Formatted::new(agent_name.to_string()));
 
-        let Some(project_name) = pyproject
-            .get_mut("project")
-            .and_then(|e| e.get_mut("name"))
-            .and_then(|e| e.as_value_mut())
-        else {
-            return Err(io::Error::other(
-                "No project.name key found in pyproject.toml!",
-            ));
-        };
-        *project_name = toml_edit::Value::String(Formatted::new(agent_name.to_string()));
-
-        let Some(project_desc) = pyproject
-            .get_mut("project")
-            .and_then(|e| e.get_mut("description"))
-            .and_then(|e| e.as_value_mut())
-        else {
-            return Err(io::Error::other(
-                "No project.name key found in pyproject.toml!",
-            ));
-        };
-        *project_desc =
-            toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
-
-        println!(
-            " -> {}",
-            style(format!("'{}'", pyproject_path.display())).blue()
-        );
-        std::fs::write(pyproject_path, pyproject.to_string())?;
+            let Some(project_desc) = pyproject
+                .get_mut("project")
+                .and_then(|e| e.get_mut("description"))
+                .and_then(|e| e.as_value_mut())
+            else {
+                return Err(io::Error::other(
+                    "No project.name key found in pyproject.toml!",
+                ));
+            };
+            *project_desc =
+                toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
+            Ok::<_, io::Error>(pyproject.to_string())
+        })?;
 
         if self.runtimes.contains(&Runtime::Npx) {
             print!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
+            edit_file_str(root.join("Dockerfile"), |mut contents| {
+                const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
+                let off = contents.find(NEEDLE).ok_or_else(|| {
+                    io::Error::other("Could not find relevant line in Dockerfile")
+                })?;
 
-            let dockerfile_path = root.join("Dockerfile");
-            let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
-
-            const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
-            let off = dockerfile
-                .find(NEEDLE)
-                .ok_or_else(|| io::Error::other("Could not find relevant line in Dockerfile"))?;
-
-            dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
-
-            println!(
-                " -> {}",
-                style(format!("'{}'", dockerfile_path.display())).blue()
-            );
-            std::fs::write(dockerfile_path, dockerfile)?;
+                contents.insert_str(off, include_str!("./nodejs.Dockerfile"));
+                Ok::<_, io::Error>(contents)
+            })?;
         }
 
         Ok(())
