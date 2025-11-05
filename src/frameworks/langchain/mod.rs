@@ -126,7 +126,7 @@ impl Template for Langchain {
     }
 
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
-        print!("🔧 {:>18} fixup", style("'pyproject.toml'").blue());
+        println!("🔧 {:>18} fixup", style("'pyproject.toml'").blue());
         edit_file_str(root.join("pyproject.toml"), |contents| {
             let mut pyproject: DocumentMut = contents.parse().unwrap();
             let Some(project_name) = pyproject
@@ -155,7 +155,7 @@ impl Template for Langchain {
         })?;
 
         if self.runtimes.contains(&Runtime::Npx) {
-            print!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
+            println!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
             edit_file_str(root.join("Dockerfile"), |mut contents| {
                 const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
                 let off = contents.find(NEEDLE).ok_or_else(|| {
