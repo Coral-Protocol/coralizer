@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use console::style;
 use itertools::Itertools;
@@ -14,8 +15,8 @@ use crate::mcp_server::{McpServer, McpServers};
 
 #[derive(Clone)]
 pub struct Langchain {
-    pub runtimes: HashSet<Runtime>,
-    pub mcps: McpServers,
+    pub runtimes: Arc<HashSet<Runtime>>,
+    pub mcps: Arc<McpServers>,
 }
 
 impl Template for Langchain {

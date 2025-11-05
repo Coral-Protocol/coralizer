@@ -5,6 +5,9 @@ use std::{fmt::Display, path::Path};
 mod langchain;
 pub use langchain::*;
 
+mod coral_rs;
+pub use coral_rs::*;
+
 use crate::languages::Language;
 
 custom_derive! {
@@ -39,11 +42,14 @@ impl Display for Framework {
     }
 }
 
-pub trait Template {
+pub trait Template: Send + Sync {
     fn name(&self) -> &'static str;
     fn artifact(&self) -> (&'static str, &'static str);
 
-    fn include_file(entry: &ignore::DirEntry) -> bool {
+    fn include_file(entry: &ignore::DirEntry) -> bool
+    where
+        Self: Sized,
+    {
         let _ = entry;
         true
     }

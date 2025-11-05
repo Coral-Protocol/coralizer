@@ -19,7 +19,7 @@ use std::{
 use toml_edit::{DocumentMut, Formatted, InlineTable, table, value};
 use zip::read::root_dir_common_filter;
 
-use crate::mcp_server::McpServers;
+use crate::{frameworks::CoralRs, mcp_server::McpServers};
 use crate::{
     frameworks::{Framework, Langchain, Template},
     mcp_server::McpServer,
@@ -218,226 +218,229 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .filter_map(|mcp| mcp.runtime())
         .collect();
 
-    match framework {
-        Framework::Langchain => {
-            let templater = Arc::new(Langchain {
-                runtimes,
-                mcps: mcp_servers,
-            });
-            let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
-                .expect("cache dir");
+    let runtimes = Arc::new(runtimes);
+    let mcps = Arc::new(mcp_servers);
 
-            let extracted_path = dirs.cache_dir().join("templates").join(templater.name());
-            fs::create_dir_all(&extracted_path).unwrap();
+    let templater: Arc<dyn Template> = {
+        let runtimes = runtimes.clone();
+        let mcps = mcps.clone();
+        match framework {
+            Framework::Langchain => Arc::new(Langchain { runtimes, mcps }),
+            Framework::CoralRs => todo!(), //Arc::new(CoralRs { runtimes, mcps }),
+        }
+    };
 
-            let (url, artefact_name) = templater.artifact();
-            let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
-            fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
+    let include_file = match framework {
+        Framework::CoralRs => CoralRs::include_file,
+        Framework::Langchain => Langchain::include_file,
+    };
 
-            let pb = ProgressBar::new(10).with_message("Fetching template...");
-            let mut response = pb.wrap_stream(reqwest::get(url).await.unwrap().bytes_stream());
+    let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
+        .expect("cache dir");
 
-            let mut artefact = File::create(&artefact_path).unwrap();
+    let extracted_path = dirs.cache_dir().join("templates").join(templater.name());
+    fs::create_dir_all(&extracted_path).unwrap();
 
-            while let Some(item) = response.next().await {
-                let chunk = item.unwrap();
-                artefact.write_all(&chunk).unwrap();
+    let (url, artefact_name) = templater.artifact();
+    let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
+    fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
+
+    let pb = ProgressBar::new(10).with_message("Fetching template...");
+    let mut response = pb.wrap_stream(reqwest::get(url).await.unwrap().bytes_stream());
+
+    let mut artefact = File::create(&artefact_path).unwrap();
+
+    while let Some(item) = response.next().await {
+        let chunk = item.unwrap();
+        artefact.write_all(&chunk).unwrap();
+    }
+    drop(artefact);
+
+    let artefact = File::open(&artefact_path).unwrap();
+    let mut archive = zip::ZipArchive::new(artefact).unwrap();
+    archive
+        .extract_unwrapped_root_dir(&extracted_path, root_dir_common_filter)
+        .unwrap();
+
+    let (tx, rx) = crossbeam::channel::unbounded();
+
+    let agent_toml: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+
+    fs::remove_dir_all(&params.path).unwrap();
+
+    let mut builder = WalkBuilder::new(&extracted_path);
+
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .filter_entry(move |entry| include_file(entry) && !entry.path().ends_with(".git"));
+
+    builder.build_parallel().run(|| {
+        let tx = tx.clone();
+        let agent_toml = agent_toml.clone();
+        Box::new(move |entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        style(format!("⚠️: error reading file - {e:?}")).yellow()
+                    );
+                    return WalkState::Continue;
+                }
+            };
+            let path = entry.path();
+            // println!("{}", path.display());
+
+            if !path.is_file() {
+                return WalkState::Continue;
             }
-            drop(artefact);
 
-            let artefact = File::open(&artefact_path).unwrap();
-            let mut archive = zip::ZipArchive::new(artefact).unwrap();
-            archive
-                .extract_unwrapped_root_dir(&extracted_path, root_dir_common_filter)
-                .unwrap();
-
-            let (tx, rx) = crossbeam::channel::unbounded();
-
-            let agent_toml: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
-
-            fs::remove_dir_all(&params.path).unwrap();
-
-            let mut builder = WalkBuilder::new(&extracted_path);
-
-            builder
-                .hidden(false)
-                .git_ignore(true)
-                .filter_entry(|entry| {
-                    Langchain::include_file(entry) && !entry.path().ends_with(".git")
-                });
-
-            builder.build_parallel().run(|| {
-                let tx = tx.clone();
-                let agent_toml = agent_toml.clone();
-                Box::new(move |entry| {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            eprintln!(
-                                "{}",
-                                style(format!("⚠️: error reading file - {e:?}")).yellow()
-                            );
-                            return WalkState::Continue;
-                        }
-                    };
-                    let path = entry.path();
-                    // println!("{}", path.display());
-
-                    if !path.is_file() {
-                        return WalkState::Continue;
-                    }
-
-                    if let Some(file_name) = path.file_name()
-                        && file_name == "coral-agent.toml"
-                        && agent_toml
-                            .lock()
-                            .unwrap()
-                            .replace(path.to_path_buf())
-                            .is_some()
-                    {
-                        eprintln!("{}", "⚠️: found multiple coral-agent.toml's?".yellow())
-                    }
-
-                    if let Err(e) = tx.send(path.to_owned()) {
-                        eprintln!("{}", style(format!("thread: {e:?}")).red());
-                        return WalkState::Quit;
-                    }
-                    WalkState::Continue
-                })
-            });
-
-            drop(tx);
-
-            let handle = std::thread::spawn(move || {
-                let pb = ProgressBar::new(10);
-                let file_count = rx.len();
-                let files = pb.wrap_iter(rx.iter());
-
-                let mut has_docker = false;
-
-                for path in files {
-                    let rel_path = path
-                        .strip_prefix(&extracted_path)
-                        .expect("path to be in base");
-                    let final_path = params.path.join(rel_path);
-
-                    if let Some(parent) = final_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    if rel_path.file_name() == Some(OsStr::new("Dockerfile")) {
-                        has_docker = true;
-                    }
-
-                    match templater.is_templated_file(rel_path) {
-                        true => {
-                            let contents = std::fs::read_to_string(&path)?;
-                            let contents = templater.template(&contents);
-
-                            std::fs::write(final_path, contents)?;
-                        }
-
-                        false => {
-                            std::fs::copy(path, final_path)?;
-                        }
-                    }
-                }
-                println!("✅ {}", format!("Processed {file_count} files.").green());
-                let Some(agent_toml_path) = agent_toml
+            if let Some(file_name) = path.file_name()
+                && file_name == "coral-agent.toml"
+                && agent_toml
                     .lock()
-                    .expect("agent toml path to not be poisoned")
-                    .take()
-                else {
-                    eprintln!("No coral-agent.toml found in template source.");
-                    return Ok(());
-                };
-
-                let mut agent_toml: DocumentMut = std::fs::read_to_string(&agent_toml_path)?
-                    .parse()
-                    .expect("valid coral-agent.toml");
-
-                // todo: alan (remove unwrap please, also, what happens if description set in template?...)
-                agent_toml
-                    .get_mut("agent")
                     .unwrap()
-                    .as_table_mut()
-                    .unwrap()
-                    .insert("description", description.into());
+                    .replace(path.to_path_buf())
+                    .is_some()
+            {
+                eprintln!("{}", "⚠️: found multiple coral-agent.toml's?".yellow())
+            }
 
-                let Some(toml_agent_name) = agent_toml
-                    .get_mut("agent")
-                    .and_then(|agent| agent.get_mut("name"))
-                    .and_then(|name| name.as_value_mut())
-                else {
-                    eprintln!("No agent.name key found in coral-agent.toml!");
-                    return Ok(());
-                };
+            if let Err(e) = tx.send(path.to_owned()) {
+                eprintln!("{}", style(format!("thread: {e:?}")).red());
+                return WalkState::Quit;
+            }
+            WalkState::Continue
+        })
+    });
 
-                *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+    drop(tx);
 
-                let Some(options) = agent_toml.get_mut("options") else {
-                    eprintln!("No options table found in coral-agent.toml!");
-                    return Ok(());
-                };
-                let options = options.as_table_mut().expect("'options' key to be a table");
-                for opt in templater
-                    .mcps
-                    .servers
-                    .values()
-                    .filter_map(|mcp| mcp.options())
-                    .flatten()
-                {
-                    let mut table = InlineTable::new();
-                    table.insert(
-                        "type",
-                        toml_edit::Value::String(Formatted::new("string".into())),
-                    );
-                    table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
-                    options.insert(
-                        &opt,
-                        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
-                    );
+    let handle = std::thread::spawn(move || {
+        let pb = ProgressBar::new(10);
+        let file_count = rx.len();
+        let files = pb.wrap_iter(rx.iter());
+
+        let mut has_docker = false;
+
+        for path in files {
+            let rel_path = path
+                .strip_prefix(&extracted_path)
+                .expect("path to be in base");
+            let final_path = params.path.join(rel_path);
+
+            if let Some(parent) = final_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            if rel_path.file_name() == Some(OsStr::new("Dockerfile")) {
+                has_docker = true;
+            }
+
+            match templater.is_templated_file(rel_path) {
+                true => {
+                    let contents = std::fs::read_to_string(&path)?;
+                    let contents = templater.template(&contents);
+
+                    std::fs::write(final_path, contents)?;
                 }
 
-                templater.post_process(&params.path, &agent_name)?;
-
-                if has_docker {
-                    let image_name = inquire::Text::new("Name of Docker image")
-                        .with_help_message(
-                            "(the image name that would be used in a `docker run <IMAGE>`)",
-                        )
-                        .with_validator(ValueRequiredValidator::default())
-                        .prompt()
-                        .unwrap();
-                    agent_toml["runtimes"]["docker"] = table();
-                    agent_toml["runtimes"]["docker"]["image"] = value(image_name);
+                false => {
+                    std::fs::copy(path, final_path)?;
                 }
-
-                let final_toml = params.path.join(
-                    agent_toml_path
-                        .strip_prefix(&extracted_path)
-                        .expect("path to be in base"),
-                );
-
-                println!(
-                    "🔧 {} fixup -> {}...",
-                    "'coral-agent.toml'".blue(),
-                    format!("'{}'", final_toml.display()).blue()
-                );
-                std::fs::write(final_toml, agent_toml.to_string())?;
-
-                println!("✅ Coralizer complete!");
-
-                Ok::<(), Box<std::io::Error>>(())
-            });
-
-            // NOTE: don't print to stdout/err before thread closes to prevent garbage
-            if let Err(e) = handle.join().expect("couldn't join on templating thread") {
-                eprintln!("Templating failed - {e:?}");
-                return Ok(());
             }
         }
-        Framework::CoralRs => todo!(),
+        println!("✅ {}", format!("Processed {file_count} files.").green());
+        let Some(agent_toml_path) = agent_toml
+            .lock()
+            .expect("agent toml path to not be poisoned")
+            .take()
+        else {
+            eprintln!("No coral-agent.toml found in template source.");
+            return Ok(());
+        };
+
+        let mut agent_toml: DocumentMut = std::fs::read_to_string(&agent_toml_path)?
+            .parse()
+            .expect("valid coral-agent.toml");
+
+        // todo: alan (remove unwrap please, also, what happens if description set in template?...)
+        agent_toml
+            .get_mut("agent")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .insert("description", description.into());
+
+        let Some(toml_agent_name) = agent_toml
+            .get_mut("agent")
+            .and_then(|agent| agent.get_mut("name"))
+            .and_then(|name| name.as_value_mut())
+        else {
+            eprintln!("No agent.name key found in coral-agent.toml!");
+            return Ok(());
+        };
+
+        *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+
+        let Some(options) = agent_toml.get_mut("options") else {
+            eprintln!("No options table found in coral-agent.toml!");
+            return Ok(());
+        };
+        let options = options.as_table_mut().expect("'options' key to be a table");
+        for opt in mcps
+            .servers
+            .values()
+            .filter_map(|mcp| mcp.options())
+            .flatten()
+        {
+            let mut table = InlineTable::new();
+            table.insert(
+                "type",
+                toml_edit::Value::String(Formatted::new("string".into())),
+            );
+            table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
+            options.insert(
+                &opt,
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
+            );
+        }
+
+        templater.post_process(&params.path, &agent_name)?;
+
+        if has_docker {
+            let image_name = inquire::Text::new("Name of Docker image")
+                .with_help_message("(the image name that would be used in a `docker run <IMAGE>`)")
+                .with_validator(ValueRequiredValidator::default())
+                .prompt()
+                .unwrap();
+            agent_toml["runtimes"]["docker"] = table();
+            agent_toml["runtimes"]["docker"]["image"] = value(image_name);
+        }
+
+        let final_toml = params.path.join(
+            agent_toml_path
+                .strip_prefix(&extracted_path)
+                .expect("path to be in base"),
+        );
+
+        println!(
+            "🔧 {} fixup -> {}...",
+            "'coral-agent.toml'".blue(),
+            format!("'{}'", final_toml.display()).blue()
+        );
+        std::fs::write(final_toml, agent_toml.to_string())?;
+
+        println!("✅ Coralizer complete!");
+
+        Ok::<(), Box<std::io::Error>>(())
+    });
+
+    // NOTE: don't print to stdout/err before thread closes to prevent garbage
+    if let Err(e) = handle.join().expect("couldn't join on templating thread") {
+        eprintln!("Templating failed - {e:?}");
+        return Ok(());
     }
 
     Ok(())
