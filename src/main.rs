@@ -247,11 +247,12 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
 
     let pb = ProgressBar::new(10).with_message("Fetching template...");
-    let mut response = pb.wrap_stream(reqwest::get(url).await.unwrap().bytes_stream());
+    let response = reqwest::get(url).await.unwrap().error_for_status().unwrap();
+    let mut bytes = pb.wrap_stream(response.bytes_stream());
 
     let mut artefact = File::create(&artefact_path).unwrap();
 
-    while let Some(item) = response.next().await {
+    while let Some(item) = bytes.next().await {
         let chunk = item.unwrap();
         artefact.write_all(&chunk).unwrap();
     }
