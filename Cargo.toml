@@ -27,3 +27,6 @@ console = "0.16.1"
 futures-util = "0.3.31"
 rmcp = { version = "0.8.3", features = ["client", "transport-child-process", "transport-sse-client-reqwest", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 anyhow = "1.0.100"
+quote = "1.0.42"
+prettyplease = "0.2.37"
+syn = "2.0.109"

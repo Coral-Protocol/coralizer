@@ -227,7 +227,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         let mcps = mcps.clone();
         match framework {
             Framework::Langchain => Arc::new(Langchain { runtimes, mcps }),
-            Framework::CoralRs => todo!(), //Arc::new(CoralRs { runtimes, mcps }),
+            Framework::CoralRs => Arc::new(CoralRs { runtimes, mcps }),
         }
     };
 
