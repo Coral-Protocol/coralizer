@@ -12,6 +12,7 @@ use std::{
     fs::{self, File},
     hash::Hash,
     io::{self, Write},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -246,17 +247,26 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
     fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
 
-    let pb = ProgressBar::new(10).with_message("Fetching template...");
-    let response = reqwest::get(url).await.unwrap().error_for_status().unwrap();
-    let mut bytes = pb.wrap_stream(response.bytes_stream());
+    let download = async || {
+        let pb = ProgressBar::new(10).with_message("Fetching template...");
+        let response = reqwest::get(url).await.unwrap().error_for_status().unwrap();
+        let mut bytes = pb.wrap_stream(response.bytes_stream());
 
-    let mut artefact = File::create(&artefact_path).unwrap();
+        let mut artefact = File::create(&artefact_path).unwrap();
+        while let Some(item) = bytes.next().await {
+            let chunk = item.unwrap();
+            artefact.write_all(&chunk).unwrap();
+        }
+        artefact.flush().unwrap();
+    };
 
-    while let Some(item) = bytes.next().await {
-        let chunk = item.unwrap();
-        artefact.write_all(&chunk).unwrap();
+    // download if file doesn't exist, isn't a file, or is empty
+    if fs::metadata(&artefact_path)
+        .map(|meta| !meta.is_file() || meta.size() == 0)
+        .unwrap_or(true)
+    {
+        download().await;
     }
-    drop(artefact);
 
     let artefact = File::open(&artefact_path).unwrap();
     let mut archive = zip::ZipArchive::new(artefact).unwrap();
@@ -269,6 +279,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     let agent_toml: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
     fs::remove_dir_all(&params.path).unwrap();
+    fs::create_dir(&params.path).unwrap();
 
     let mut builder = WalkBuilder::new(&extracted_path);
 
