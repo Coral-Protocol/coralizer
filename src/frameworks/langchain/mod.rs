@@ -2,17 +2,22 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
+use console::style;
 use itertools::Itertools;
 use regex::Regex;
 use toml_edit::{DocumentMut, Formatted};
 
+use crate::Runtime;
+use crate::edit::edit_file_str;
 use crate::frameworks::Template;
-use crate::{Mcp, Runtime};
+use crate::mcp_server::{McpServer, McpServers};
 
 #[derive(Clone)]
 pub struct Langchain {
-    pub runtimes: HashSet<Runtime>,
+    pub runtimes: Arc<HashSet<Runtime>>,
+    pub mcps: Arc<McpServers>,
 }
 
 impl Template for Langchain {
@@ -21,8 +26,8 @@ impl Template for Langchain {
     }
     fn artifact(&self) -> (&'static str, &'static str) {
         (
-            "https://github.com/Coral-Protocol/langchain-agent/archive/fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
-            "fb3a82a5ff436f3b8cb68a6902aed5dfa77ba7d9.zip",
+            "https://github.com/Coral-Protocol/langchain-agent/archive/d77845581b94e17c39bfcf0f57c6faf89bdc90d2.zip",
+            "d77845581b94e17c39bfcf0f57c6faf89bdc90d2.zip",
         )
     }
     fn include_file(entry: &ignore::DirEntry) -> bool {
@@ -42,7 +47,7 @@ impl Template for Langchain {
         }
         false
     }
-    fn template(&self, mcps: &[Mcp], contents: &str) -> String {
+    fn template(&self, contents: &str) -> String {
         let mcp_client_re =
             Regex::new(r#"MultiServerMCPClient\s*\(\s*connections\s*=\s*\{\s*"coral"\s*:\s*\{(\s*".*,\n)*(\s*)}"#)
                 .unwrap();
@@ -52,11 +57,12 @@ impl Template for Langchain {
             let ind = " ".repeat(group.len());
             let mut s = String::new();
             writeln!(s, ",").unwrap();
-            for (i, mcp) in mcps.iter().enumerate() {
+            for (i, (mcp_name, mcp)) in self.mcps.servers.iter().enumerate() {
+                // TODO (alan): dedupe this
                 match mcp {
-                    Mcp::Stdio { command, args, env } => {
+                    McpServer::Stdio { command, args, env } => {
                         let args = args.iter().map(|a| format!("\"{a}\"")).collect_vec();
-                        writeln!(s, r#"{ind}"TODO": {{"#).unwrap();
+                        writeln!(s, r#"{ind}"{mcp_name}": {{"#).unwrap();
                         writeln!(s, r#"{ind}    "transport": "stdio","#).unwrap();
                         writeln!(s, r#"{ind}    "command": "{command}","#).unwrap();
                         if let Some(env) = env
@@ -76,14 +82,41 @@ impl Template for Langchain {
                         }
                         writeln!(s, r#"{ind}    "args": [{}]"#, args.join(", ")).unwrap();
                         write!(s, r#"{ind}}}"#).unwrap();
-                        match i + 1 == mcps.len() {
-                            true => write!(s, ","),
-                            false => writeln!(s),
-                        }
-                        .unwrap()
                     }
-                    Mcp::Sse {} => todo!(),
+                    McpServer::Http { url, headers } | McpServer::Sse { url, headers } => {
+                        let transport = match mcp {
+                            McpServer::Http { .. } => "streamable_http",
+                            McpServer::Sse { .. } => "sse",
+                            _ => unreachable!(),
+                        };
+                        writeln!(s, r#"{ind}"{mcp_name}": {{"#).unwrap();
+                        writeln!(s, r#"{ind}    "transport": "{transport}","#).unwrap();
+                        write!(s, r#"{ind}    "url": "{url}""#).unwrap();
+                        if let Some(headers) = headers
+                            && !headers.is_empty()
+                        {
+                            writeln!(s, ",").unwrap();
+                            writeln!(s, r#"{ind}    "headers": {{"#).unwrap();
+                            for (i, (header, opt)) in headers.iter().enumerate() {
+                                write!(s, r#"{ind}        "{header}": asserted_env("{opt}")"#)
+                                    .unwrap();
+                                match i + 1 == header.len() {
+                                    true => writeln!(s, ","),
+                                    false => writeln!(s),
+                                }
+                                .unwrap()
+                            }
+                            write!(s, r#"{ind}    }}"#).unwrap();
+                        }
+                        writeln!(s).unwrap();
+                        write!(s, r#"{ind}}}"#).unwrap();
+                    }
                 }
+                match i + 1 == self.mcps.servers.len() {
+                    true => write!(s, ","),
+                    false => writeln!(s),
+                }
+                .unwrap()
             }
             contents.insert_str(group.end() + 1, &s);
         } else {
@@ -93,50 +126,46 @@ impl Template for Langchain {
     }
 
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()> {
-        let pyproject_path = root.join("pyproject.toml");
-        let mut pyproject: DocumentMut = std::fs::read_to_string(&pyproject_path)?.parse().unwrap();
+        println!("🔧 {:>18} fixup", style("'pyproject.toml'").blue());
+        edit_file_str(root.join("pyproject.toml"), |contents| {
+            let mut pyproject: DocumentMut = contents.parse().unwrap();
+            let Some(project_name) = pyproject
+                .get_mut("project")
+                .and_then(|e| e.get_mut("name"))
+                .and_then(|e| e.as_value_mut())
+            else {
+                return Err(io::Error::other(
+                    "No project.name key found in pyproject.toml!",
+                ));
+            };
+            *project_name = toml_edit::Value::String(Formatted::new(agent_name.to_string()));
 
-        let Some(project_name) = pyproject
-            .get_mut("project")
-            .and_then(|e| e.get_mut("name"))
-            .and_then(|e| e.as_value_mut())
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No project.name key found in pyproject.toml!",
-            ));
-        };
-        *project_name = toml_edit::Value::String(Formatted::new(agent_name.to_string()));
-
-        let Some(project_desc) = pyproject
-            .get_mut("project")
-            .and_then(|e| e.get_mut("description"))
-            .and_then(|e| e.as_value_mut())
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No project.name key found in pyproject.toml!",
-            ));
-        };
-        *project_desc =
-            toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
-
-        std::fs::write(pyproject_path, pyproject.to_string())?;
-
-        let dockerfile_path = root.join("Dockerfile");
-        let mut dockerfile = std::fs::read_to_string(&dockerfile_path)?;
-
-        const NEEDLE: &'static str = "COPY --from=builder --chown=app:app /app/ /app/";
-        let off = dockerfile.find(NEEDLE).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "Could not find relevant line in Dockerfile",
-            )
+            let Some(project_desc) = pyproject
+                .get_mut("project")
+                .and_then(|e| e.get_mut("description"))
+                .and_then(|e| e.as_value_mut())
+            else {
+                return Err(io::Error::other(
+                    "No project.name key found in pyproject.toml!",
+                ));
+            };
+            *project_desc =
+                toml_edit::Value::String(Formatted::new("Coralized langchain agent".into()));
+            Ok::<_, io::Error>(pyproject.to_string())
         })?;
 
-        dockerfile.insert_str(off, include_str!("./nodejs.Dockerfile"));
+        if self.runtimes.contains(&Runtime::Npx) {
+            println!("🔧 {:>18} fixup", style("'Dockerfile'").blue());
+            edit_file_str(root.join("Dockerfile"), |mut contents| {
+                const NEEDLE: &str = "COPY --from=builder --chown=app:app /app/ /app/";
+                let off = contents.find(NEEDLE).ok_or_else(|| {
+                    io::Error::other("Could not find relevant line in Dockerfile")
+                })?;
 
-        std::fs::write(dockerfile_path, dockerfile)?;
+                contents.insert_str(off, include_str!("./nodejs.Dockerfile"));
+                Ok::<_, io::Error>(contents)
+            })?;
+        }
 
         Ok(())
     }

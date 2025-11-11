@@ -1,21 +1,30 @@
+use clap::Parser;
+use console::style;
+use futures_util::StreamExt as _;
+use ignore::{WalkBuilder, WalkState};
+use indicatif::ProgressBar;
+use inquire::{error::InquireResult, validator::ValueRequiredValidator};
+use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fmt::Display,
     fs::{self, File},
     hash::Hash,
     io::{self, Write},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-
-use clap::Parser;
-use ignore::{WalkBuilder, WalkState};
-use inquire::{error::InquireResult, validator::ValueRequiredValidator};
-use itertools::Itertools;
-use toml_edit::{DocumentMut, Formatted, InlineTable, TableLike};
+use toml_edit::{DocumentMut, table, value};
 use zip::read::root_dir_common_filter;
 
-use crate::frameworks::{Framework, Langchain, Template};
+use crate::{edit::edit_file_str, frameworks::CoralRs, mcp_server::McpServers};
+use crate::{
+    frameworks::{Framework, Langchain, Template},
+    mcp_server::McpServer,
+};
 use custom_derive::custom_derive;
 use enum_derive::*;
 
@@ -26,6 +35,7 @@ pub enum Cli {
 #[derive(clap::Args)]
 pub struct McpParams {
     pub path: PathBuf,
+    pub mcp_servers_path: PathBuf,
 
     #[arg(long, short)]
     pub framework: Option<Framework>,
@@ -33,7 +43,10 @@ pub struct McpParams {
     pub name: Option<String>,
 }
 
+pub mod edit;
 pub mod frameworks;
+pub mod mcp_client;
+pub mod mcp_server;
 
 pub mod languages {
     use custom_derive::custom_derive;
@@ -74,12 +87,6 @@ pub enum Runtime {
 }
 
 impl McpKind {
-    fn runtime(&self) -> Option<Runtime> {
-        match self {
-            McpKind::Npx => Some(Runtime::Npx),
-            McpKind::Stdio | McpKind::Sse => None,
-        }
-    }
     fn env_wizard() -> InquireResult<HashMap<String, String>> {
         let mut envs = HashMap::new();
         loop {
@@ -103,7 +110,7 @@ impl McpKind {
         }
         Ok(envs)
     }
-    pub fn wizard(self) -> InquireResult<Mcp> {
+    pub fn wizard(self) -> InquireResult<McpServer> {
         Ok(match self {
             McpKind::Npx => {
                 let package = inquire::Text::new("Name of the npm package (e.g '@org/mcp-server')")
@@ -118,7 +125,7 @@ impl McpKind {
                         .prompt()?;
                 args.extend(extra_args.split_whitespace().map(|s| s.to_owned()));
 
-                Mcp::Stdio {
+                McpServer::Stdio {
                     command: "npx".to_string(),
                     args,
                     env: Some(envs),
@@ -135,35 +142,31 @@ impl McpKind {
 
                 let env = Some(Self::env_wizard()?);
 
-                Mcp::Stdio { command, args, env }
+                McpServer::Stdio { command, args, env }
             }
             McpKind::Sse => todo!(),
         })
     }
 }
 
-pub enum Mcp {
-    Stdio {
-        command: String,
-        args: Vec<String>,
-        env: Option<HashMap<String, String>>,
-    },
-    Sse {},
-}
+use colored::Colorize;
 
-impl Mcp {
-    pub fn options(&self) -> Vec<String> {
-        match self {
-            Mcp::Stdio { env, .. } => env
-                .as_ref()
-                .map(|e| e.values().cloned().collect_vec())
-                .unwrap_or_default(),
-            Mcp::Sse {} => todo!(),
+async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
+    if fs::exists(&params.path).unwrap() {
+        if !inquire::Confirm::new(&format!(
+            "Directory {} already exists - continue & delete existing?",
+            format!("'{}'", params.path.as_path().display()).blue()
+        ))
+        .with_default(false)
+        .prompt()?
+        {
+            println!("{} {}", ">".green(), "Cancelled.".red());
+            return Ok(());
         }
+    } else {
+        fs::create_dir_all(&params.path)?;
     }
-}
 
-fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     let agent_name = params.name.unwrap_or_else(|| {
         params
             .path
@@ -176,18 +179,6 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
             .to_string()
     });
 
-    if fs::exists(&params.path).unwrap() {
-        if !inquire::Confirm::new(&format!(
-            "'{}' already exists - continue & delete existing?",
-            params.path.as_path().display()
-        ))
-        .with_default(false)
-        .prompt()?
-        {
-            println!("Cancelled.");
-            return Ok(());
-        }
-    }
     let framework = match params.framework {
         Some(framework) => framework,
         None => inquire::Select::new(
@@ -199,190 +190,254 @@ fn mcp_wizard(params: McpParams) -> InquireResult<()> {
         .prompt()?,
     };
 
-    let mut mcps: Vec<Mcp> = vec![];
-    let mut runtimes: HashSet<Runtime> = HashSet::new();
-
-    let mcp_kind = inquire::Select::new(
-        "What kind of MCP server are you adding?",
-        McpKind::iter_variants().collect_vec(),
+    let mut mcp_servers: McpServers = serde_json::from_str(
+        fs::read_to_string(params.mcp_servers_path)
+            .unwrap()
+            .as_str(),
     )
-    .prompt()?;
+    .expect("invalid json");
+    mcp_servers
+        .servers
+        .values_mut()
+        .flat_map(|server| {
+            let map = match server {
+                McpServer::Http { headers, .. } | McpServer::Sse { headers, .. } => headers,
+                McpServer::Stdio { env, .. } => env,
+            };
+            map.iter_mut().flat_map(|env| env.iter_mut())
+        })
+        .for_each(|(k, v)| *v = k.clone());
 
-    if let Some(runtime) = mcp_kind.runtime() {
-        runtimes.insert(runtime);
+    let pb = ProgressBar::new_spinner();
+    pb.enable_steady_tick(Duration::from_millis(300));
+    let description = mcp_servers.generate_description(pb).await;
+    println!("✅ {}", "Agent description generated".green());
+
+    // todo: alan what was the purpose of this...
+    let runtimes: HashSet<Runtime> = mcp_servers
+        .servers
+        .values()
+        .filter_map(|mcp| mcp.runtime())
+        .collect();
+
+    let runtimes = Arc::new(runtimes);
+    let mcps = Arc::new(mcp_servers);
+
+    let templater: Arc<dyn Template> = {
+        let runtimes = runtimes.clone();
+        let mcps = mcps.clone();
+        match framework {
+            Framework::Langchain => Arc::new(Langchain { runtimes, mcps }),
+            Framework::CoralRs => Arc::new(CoralRs { runtimes, mcps }),
+        }
+    };
+
+    let include_file = match framework {
+        Framework::CoralRs => CoralRs::include_file,
+        Framework::Langchain => Langchain::include_file,
+    };
+
+    let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
+        .expect("cache dir");
+
+    let extracted_path = dirs.cache_dir().join("templates").join(templater.name());
+    fs::create_dir_all(&extracted_path).unwrap();
+
+    let (url, artefact_name) = templater.artifact();
+    let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
+    fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
+
+    let download = async || {
+        let pb = ProgressBar::new(10).with_message("Fetching template...");
+        let response = reqwest::get(url).await.unwrap().error_for_status().unwrap();
+        let mut bytes = pb.wrap_stream(response.bytes_stream());
+
+        let mut artefact = File::create(&artefact_path).unwrap();
+        while let Some(item) = bytes.next().await {
+            let chunk = item.unwrap();
+            artefact.write_all(&chunk).unwrap();
+        }
+        artefact.flush().unwrap();
+    };
+
+    // download if file doesn't exist, isn't a file, or is empty
+    if fs::metadata(&artefact_path)
+        .map(|meta| !meta.is_file() || meta.size() == 0)
+        .unwrap_or(true)
+    {
+        download().await;
     }
-    mcps.push(mcp_kind.wizard()?);
 
-    match framework {
-        Framework::Langchain => {
-            let templater = Arc::new(Langchain { runtimes });
-            let dirs = directories_next::ProjectDirs::from("com", "coral-protocol", "coralizer")
-                .expect("cache dir");
+    let artefact = File::open(&artefact_path).unwrap();
+    let mut archive = zip::ZipArchive::new(artefact).unwrap();
+    archive
+        .extract_unwrapped_root_dir(&extracted_path, root_dir_common_filter)
+        .unwrap();
 
-            let extracted_path = dirs.cache_dir().join("templates").join(templater.name());
-            fs::create_dir_all(&extracted_path).unwrap();
+    let (tx, rx) = crossbeam::channel::unbounded();
 
-            let (url, artefact_name) = templater.artifact();
-            let artefact_path = dirs.cache_dir().join("artefacts").join(artefact_name);
-            fs::create_dir_all(artefact_path.parent().unwrap(/* Safety: see above */)).unwrap();
+    let agent_toml: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
-            let response = reqwest::blocking::get(url).unwrap().bytes().unwrap();
+    fs::remove_dir_all(&params.path).unwrap();
+    fs::create_dir(&params.path).unwrap();
 
-            let mut artefact = File::create(&artefact_path).unwrap();
-            artefact.write_all(&response);
-            drop(artefact);
+    let mut builder = WalkBuilder::new(&extracted_path);
 
-            let mut artefact = File::open(&artefact_path).unwrap();
-            let mut archive = zip::ZipArchive::new(artefact).unwrap();
-            archive
-                .extract_unwrapped_root_dir(&extracted_path, root_dir_common_filter)
-                .unwrap();
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .filter_entry(move |entry| include_file(entry) && !entry.path().ends_with(".git"));
 
-            let (tx, rx) = crossbeam::channel::unbounded();
-
-            let agent_toml: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
-
-            fs::remove_dir_all(&params.path).unwrap();
-
-            let mut builder = WalkBuilder::new(&extracted_path);
-
-            builder
-                .hidden(false)
-                .git_ignore(true)
-                .filter_entry(|entry| {
-                    Langchain::include_file(entry) && !entry.path().ends_with(".git")
-                });
-
-            builder.build_parallel().run(|| {
-                let tx = tx.clone();
-                let agent_toml = agent_toml.clone();
-                let templater = templater.clone();
-                Box::new(move |entry| {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            eprintln!("Error reading file - {e:?}");
-                            return WalkState::Continue;
-                        }
-                    };
-                    let path = entry.path();
-                    println!("{}", path.display());
-
-                    if !path.is_file() {
-                        return WalkState::Continue;
-                    }
-
-                    if let Some(file_name) = path.file_name()
-                        && file_name == "coral-agent.toml"
-                        && agent_toml
-                            .lock()
-                            .unwrap()
-                            .replace(path.to_path_buf())
-                            .is_some()
-                    {
-                        eprintln!("Warning: found multiple coral-agent.toml's?")
-                    }
-
-                    if let Err(e) = tx.send(path.to_owned()) {
-                        eprintln!("thread: {e:?}");
-                        return WalkState::Quit;
-                    }
-                    WalkState::Continue
-                })
-            });
-
-            drop(tx);
-
-            let handle = std::thread::spawn(move || {
-                while let Ok(path) = rx.recv() {
-                    let rel_path = path
-                        .strip_prefix(&extracted_path)
-                        .expect("path to be in base");
-                    let final_path = params.path.join(rel_path);
-
-                    if let Some(parent) = final_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    match templater.is_templated_file(rel_path) {
-                        true => {
-                            let contents = std::fs::read_to_string(&path)?;
-                            let contents = templater.template(&mcps, &contents);
-
-                            std::fs::write(final_path, contents)?;
-                        }
-
-                        false => {
-                            std::fs::copy(path, final_path)?;
-                        }
-                    }
+    builder.build_parallel().run(|| {
+        let tx = tx.clone();
+        let agent_toml = agent_toml.clone();
+        Box::new(move |entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        style(format!("⚠️: error reading file - {e:?}")).yellow()
+                    );
+                    return WalkState::Continue;
                 }
-                let Some(agent_toml_path) = agent_toml.lock().unwrap().take() else {
-                    eprintln!("No coral-agent.toml found in template source.");
-                    return Ok(());
-                };
+            };
+            let path = entry.path();
+            // println!("{}", path.display());
 
-                let mut agent_toml: DocumentMut =
-                    std::fs::read_to_string(&agent_toml_path)?.parse().unwrap();
+            if !path.is_file() {
+                return WalkState::Continue;
+            }
 
-                let Some(toml_agent_name) = agent_toml
-                    .get_mut("agent")
-                    .and_then(|agent| agent.get_mut("name"))
-                    .and_then(|name| name.as_value_mut())
-                else {
-                    eprintln!("No agent.name key found in coral-agent.toml!");
-                    return Ok(());
-                };
+            if let Some(file_name) = path.file_name()
+                && file_name == "coral-agent.toml"
+                && agent_toml
+                    .lock()
+                    .unwrap()
+                    .replace(path.to_path_buf())
+                    .is_some()
+            {
+                eprintln!("{}", "⚠️: found multiple coral-agent.toml's?".yellow())
+            }
 
-                *toml_agent_name = toml_edit::Value::String(Formatted::new(agent_name.clone()));
+            if let Err(e) = tx.send(path.to_owned()) {
+                eprintln!("{}", style(format!("thread: {e:?}")).red());
+                return WalkState::Quit;
+            }
+            WalkState::Continue
+        })
+    });
 
-                let Some(options) = agent_toml.get_mut("options") else {
-                    eprintln!("No options table found in coral-agent.toml!");
-                    return Ok(());
-                };
-                let options = options.as_table_mut().expect("'options' key to be a table");
-                for opt in mcps.iter().flat_map(|mcp| mcp.options()) {
-                    let mut table = InlineTable::new();
-                    table.insert(
-                        "type",
-                        toml_edit::Value::String(Formatted::new("string".into())),
-                    );
-                    table.insert("required", toml_edit::Value::Boolean(Formatted::new(true)));
-                    options.insert(
-                        &opt,
-                        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)),
-                    );
+    drop(tx);
+
+    let handle = std::thread::spawn(move || {
+        let pb = ProgressBar::new(10);
+        let file_count = rx.len();
+        let files = pb.wrap_iter(rx.iter());
+
+        let mut has_docker = false;
+
+        for path in files {
+            let rel_path = path
+                .strip_prefix(&extracted_path)
+                .expect("path to be in base");
+            let final_path = params.path.join(rel_path);
+
+            if let Some(parent) = final_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            if rel_path.file_name() == Some(OsStr::new("Dockerfile")) {
+                has_docker = true;
+            }
+
+            match templater.is_templated_file(rel_path) {
+                true => {
+                    let contents = std::fs::read_to_string(&path)?;
+                    let contents = templater.template(&contents);
+
+                    std::fs::write(final_path, contents)?;
                 }
 
-                let final_toml = params.path.join(
-                    agent_toml_path
-                        .strip_prefix(&extracted_path)
-                        .expect("path to be in base"),
-                );
-
-                std::fs::write(final_toml, agent_toml.to_string())?;
-
-                templater.post_process(&params.path, &agent_name);
-
-                Ok::<(), Box<std::io::Error>>(())
-            });
-            if let Err(e) = handle.join().expect("couldn't join on templating thread") {
-                eprintln!("Templating failed - {e:?}");
-                return Ok(());
+                false => {
+                    std::fs::copy(path, final_path)?;
+                }
             }
         }
-        Framework::CoralRs => todo!(),
+        println!("✅ {}", format!("Processed {file_count} files.").green());
+
+        edit_file_str(params.path.join("coral-agent.toml"), move |contents| {
+            let mut agent_toml: DocumentMut = contents.parse().expect("valid coral-agent.toml");
+
+            // NOTE: implicit assumption that all of our templates will have an agent table already
+            // defined
+            agent_toml["agent"]["name"] = value(agent_name.clone());
+            agent_toml["agent"]["description"] = value(description);
+
+            let Some(options) = agent_toml.get_mut("options") else {
+                return Err(io::Error::other(
+                    "No options table found in coral-agent.toml!",
+                ));
+            };
+            let options = options.as_table_mut().expect("'options' key to be a table");
+            for opt in mcps
+                .servers
+                .values()
+                .filter_map(|mcp| mcp.options())
+                .flatten()
+            {
+                options[&opt]["type"] = "string".into();
+                options[&opt]["required"] = true.into();
+                if let Some(t) = options[&opt].as_inline_table_mut() {
+                    t.fmt()
+                }
+            }
+
+            templater.post_process(&params.path, &agent_name)?;
+
+            if has_docker {
+                let image_name = inquire::Text::new("Name of Docker image")
+                    .with_help_message(
+                        "(the image name that would be used in a `docker run <IMAGE>`)",
+                    )
+                    .with_validator(ValueRequiredValidator::default())
+                    .prompt()
+                    .unwrap();
+                agent_toml["runtimes"]["docker"] = table();
+                agent_toml["runtimes"]["docker"]["image"] = value(image_name);
+            }
+
+            Ok::<_, io::Error>(agent_toml.to_string())
+        })?;
+
+        // println!(
+        //     "🔧 {} fixup -> {}...",
+        //     "'coral-agent.toml'".blue(),
+        //     format!("'{}'", final_toml.display()).blue()
+        // );
+        // std::fs::write(final_toml, agent_toml.to_string())?;
+
+        println!("✅ Coralizer complete!");
+
+        Ok::<(), Box<std::io::Error>>(())
+    });
+
+    // NOTE: don't print to stdout/err before thread closes to prevent garbage
+    if let Err(e) = handle.join().expect("couldn't join on templating thread") {
+        eprintln!("Templating failed - {e:?}");
+        return Ok(());
     }
 
     Ok(())
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     match cli {
         Cli::Mcp(params) => {
-            if let Err(e) = mcp_wizard(params) {
+            if let Err(e) = mcp_wizard(params).await {
                 match e {
                     inquire::InquireError::OperationCanceled
                     | inquire::InquireError::OperationInterrupted => {

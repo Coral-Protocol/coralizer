@@ -1,11 +1,14 @@
 use custom_derive::custom_derive;
 use enum_derive::*;
-use std::{collections::HashSet, fmt::Display, path::Path};
+use std::{fmt::Display, path::Path};
 
 mod langchain;
 pub use langchain::*;
 
-use crate::{Mcp, Runtime, languages::Language};
+mod coral_rs;
+pub use coral_rs::*;
+
+use crate::languages::Language;
 
 custom_derive! {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, clap::ValueEnum)]
@@ -39,11 +42,14 @@ impl Display for Framework {
     }
 }
 
-pub trait Template {
+pub trait Template: Send + Sync {
     fn name(&self) -> &'static str;
     fn artifact(&self) -> (&'static str, &'static str);
 
-    fn include_file(entry: &ignore::DirEntry) -> bool {
+    fn include_file(entry: &ignore::DirEntry) -> bool
+    where
+        Self: Sized,
+    {
         let _ = entry;
         true
     }
@@ -51,6 +57,6 @@ pub trait Template {
         let _ = path;
         true
     }
-    fn template(&self, mcps: &[Mcp], contents: &str) -> String;
+    fn template(&self, contents: &str) -> String;
     fn post_process(&self, root: &Path, agent_name: &str) -> std::io::Result<()>;
 }
