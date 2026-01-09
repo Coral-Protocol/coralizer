@@ -1,0 +1,172 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build - ${{ matrix.build.NAME }}
+    runs-on: ${{ matrix.build.OS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - {
+              NAME: linux-x64,
+              OS: ubuntu-latest,
+              TARGET: x86_64-unknown-linux-gnu,
+              PKG_OS: linux,
+              PKG_ARCH: x64,
+              PKG_EXT: ""
+            }
+          - {
+              NAME: linux-arm64,
+              OS: ubuntu-latest,
+              TARGET: aarch64-unknown-linux-gnu,
+              PKG_OS: linux,
+              PKG_ARCH: arm64,
+              PKG_EXT: ""
+            }
+          - {
+              NAME: darwin-x64,
+              OS: macos-latest,
+              TARGET: x86_64-apple-darwin,
+              PKG_OS: darwin,
+              PKG_ARCH: x64,
+              PKG_EXT: ""
+            }
+          - {
+              NAME: darwin-arm64,
+              OS: macos-latest,
+              TARGET: aarch64-apple-darwin,
+              PKG_OS: darwin,
+              PKG_ARCH: arm64,
+              PKG_EXT: ""
+            }
+          - {
+              NAME: win32-x64,
+              OS: windows-latest,
+              TARGET: x86_64-pc-windows-msvc,
+              PKG_OS: win32,
+              PKG_ARCH: x64,
+              PKG_EXT: ".exe"
+            }
+          - {
+              NAME: win32-arm64,
+              OS: windows-latest,
+              TARGET: aarch64-pc-windows-msvc,
+              PKG_OS: win32,
+              PKG_ARCH: arm64,
+              PKG_EXT: ".exe"
+            }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        shell: bash
+        run: |
+          COUNT=$(git rev-list --count HEAD)
+          echo "VERSION=0.${COUNT}.0" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.build.TARGET }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.build.TARGET == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.build.TARGET }}" == "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --target ${{ matrix.build.TARGET }}
+
+      - name: Create package directory
+        shell: bash
+        run: mkdir -p npm/package/bin
+
+      - name: Prepare package
+        shell: bash
+        run: |
+          cp target/${{ matrix.build.TARGET }}/release/coralizer${{ matrix.build.PKG_EXT }} npm/package/bin/
+          
+          export PKG_NAME="coralizer-${{ matrix.build.PKG_OS }}-${{ matrix.build.PKG_ARCH }}"
+          export PKG_VERSION="${{ steps.version.outputs.VERSION }}"
+          export PKG_OS="${{ matrix.build.PKG_OS }}"
+          export PKG_ARCH="${{ matrix.build.PKG_ARCH }}"
+          export PKG_EXT="${{ matrix.build.PKG_EXT }}"
+          
+          node -e "
+            const fs = require('fs');
+            const template = fs.readFileSync('npm/package.json.tmpl', 'utf8');
+            const pkg = template
+              .replace(/\${PKG_NAME}/g, process.env.PKG_NAME)
+              .replace(/\${PKG_VERSION}/g, process.env.PKG_VERSION)
+              .replace(/\${PKG_OS}/g, process.env.PKG_OS)
+              .replace(/\${PKG_ARCH}/g, process.env.PKG_ARCH)
+              .replace(/\${PKG_EXT}/g, process.env.PKG_EXT);
+            fs.writeFileSync('npm/package/package.json', pkg);
+          "
+
+      - name: Publish to NPM
+        shell: bash
+        run: |
+          cd npm/package
+          npm config set //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
+          npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-base:
+    name: Publish Base Package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        shell: bash
+        run: |
+          COUNT=$(git rev-list --count HEAD)
+          echo "VERSION=0.${COUNT}.0" >> $GITHUB_OUTPUT
+
+      - name: Prepare base package
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          cd npm/app
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            if (pkg.optionalDependencies) {
+              for (const dep in pkg.optionalDependencies) {
+                pkg.optionalDependencies[dep] = '$VERSION';
+              }
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+
+      - name: Publish to NPM
+        shell: bash
+        run: |
+          cd npm/app
+          npm config set //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
+          npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
