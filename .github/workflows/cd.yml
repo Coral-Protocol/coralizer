@@ -17,62 +17,41 @@ jobs:
               NAME: linux-x64,
               OS: ubuntu-latest,
               TARGET: x86_64-unknown-linux-gnu,
-              PKG_OS: linux,
-              PKG_ARCH: x64,
               PKG_EXT: ""
             }
           - {
               NAME: linux-arm64,
               OS: ubuntu-latest,
               TARGET: aarch64-unknown-linux-gnu,
-              PKG_OS: linux,
-              PKG_ARCH: arm64,
               PKG_EXT: ""
             }
           - {
               NAME: darwin-x64,
               OS: macos-latest,
               TARGET: x86_64-apple-darwin,
-              PKG_OS: darwin,
-              PKG_ARCH: x64,
               PKG_EXT: ""
             }
           - {
               NAME: darwin-arm64,
               OS: macos-latest,
               TARGET: aarch64-apple-darwin,
-              PKG_OS: darwin,
-              PKG_ARCH: arm64,
               PKG_EXT: ""
             }
           - {
               NAME: win32-x64,
               OS: windows-latest,
               TARGET: x86_64-pc-windows-msvc,
-              PKG_OS: win32,
-              PKG_ARCH: x64,
               PKG_EXT: ".exe"
             }
           - {
               NAME: win32-arm64,
               OS: windows-latest,
               TARGET: aarch64-pc-windows-msvc,
-              PKG_OS: win32,
-              PKG_ARCH: arm64,
               PKG_EXT: ".exe"
             }
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Calculate version
-        id: version
-        shell: bash
-        run: |
-          COUNT=$(git rev-list --count HEAD)
-          echo "VERSION=0.${COUNT}.0" >> $GITHUB_OUTPUT
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -94,44 +73,14 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.build.TARGET }}
 
-      - name: Create package directory
-        shell: bash
-        run: mkdir -p npm/package/bin
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.build.NAME }}
+          path: target/${{ matrix.build.TARGET }}/release/coralizer${{ matrix.build.PKG_EXT }}
 
-      - name: Prepare package
-        shell: bash
-        run: |
-          cp target/${{ matrix.build.TARGET }}/release/coralizer${{ matrix.build.PKG_EXT }} npm/package/bin/
-          
-          export PKG_NAME="coralizer-${{ matrix.build.PKG_OS }}-${{ matrix.build.PKG_ARCH }}"
-          export PKG_VERSION="${{ steps.version.outputs.VERSION }}"
-          export PKG_OS="${{ matrix.build.PKG_OS }}"
-          export PKG_ARCH="${{ matrix.build.PKG_ARCH }}"
-          export PKG_EXT="${{ matrix.build.PKG_EXT }}"
-          
-          node -e '
-            const fs = require("fs");
-            const template = fs.readFileSync("npm/package.json.tmpl", "utf8");
-            const pkg = template
-              .split("${PKG_NAME}").join(process.env.PKG_NAME)
-              .split("${PKG_VERSION}").join(process.env.PKG_VERSION)
-              .split("${PKG_OS}").join(process.env.PKG_OS)
-              .split("${PKG_ARCH}").join(process.env.PKG_ARCH)
-              .split("${PKG_EXT}").join(process.env.PKG_EXT);
-            fs.writeFileSync("npm/package/package.json", pkg);
-          '
-
-      - name: Publish to NPM
-        shell: bash
-        run: |
-          cd npm/package
-          npm config set //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
-          npm publish --access public
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  publish-base:
-    name: Publish Base Package
+  publish:
+    name: Publish to NPM
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -146,28 +95,32 @@ jobs:
           COUNT=$(git rev-list --count HEAD)
           echo "VERSION=0.${COUNT}.0" >> $GITHUB_OUTPUT
 
-      - name: Prepare base package
-        shell: bash
-        run: |
-          export VERSION="${{ steps.version.outputs.VERSION }}"
-          cd npm/app
-          node -e '
-            const fs = require("fs");
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-            pkg.version = process.env.VERSION;
-            if (pkg.optionalDependencies) {
-              for (const dep in pkg.optionalDependencies) {
-                pkg.optionalDependencies[dep] = process.env.VERSION;
-              }
-            }
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
-          '
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Publish to NPM
-        shell: bash
-        run: |
-          cd npm/app
-          npm config set //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
-          npm publish --access public
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish all packages
+        run: node npm/publish.js
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: Release v${{ steps.version.outputs.VERSION }}
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
