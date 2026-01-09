@@ -109,17 +109,17 @@ jobs:
           export PKG_ARCH="${{ matrix.build.PKG_ARCH }}"
           export PKG_EXT="${{ matrix.build.PKG_EXT }}"
           
-          node -e "
-            const fs = require('fs');
-            const template = fs.readFileSync('npm/package.json.tmpl', 'utf8');
+          node -e '
+            const fs = require("fs");
+            const template = fs.readFileSync("npm/package.json.tmpl", "utf8");
             const pkg = template
-              .replace(/\${PKG_NAME}/g, process.env.PKG_NAME)
-              .replace(/\${PKG_VERSION}/g, process.env.PKG_VERSION)
-              .replace(/\${PKG_OS}/g, process.env.PKG_OS)
-              .replace(/\${PKG_ARCH}/g, process.env.PKG_ARCH)
-              .replace(/\${PKG_EXT}/g, process.env.PKG_EXT);
-            fs.writeFileSync('npm/package/package.json', pkg);
-          "
+              .split("${PKG_NAME}").join(process.env.PKG_NAME)
+              .split("${PKG_VERSION}").join(process.env.PKG_VERSION)
+              .split("${PKG_OS}").join(process.env.PKG_OS)
+              .split("${PKG_ARCH}").join(process.env.PKG_ARCH)
+              .split("${PKG_EXT}").join(process.env.PKG_EXT);
+            fs.writeFileSync("npm/package/package.json", pkg);
+          '
 
       - name: Publish to NPM
         shell: bash
@@ -149,19 +149,19 @@ jobs:
       - name: Prepare base package
         shell: bash
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
+          export VERSION="${{ steps.version.outputs.VERSION }}"
           cd npm/app
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '$VERSION';
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = process.env.VERSION;
             if (pkg.optionalDependencies) {
               for (const dep in pkg.optionalDependencies) {
-                pkg.optionalDependencies[dep] = '$VERSION';
+                pkg.optionalDependencies[dep] = process.env.VERSION;
               }
             }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-          "
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
 
       - name: Publish to NPM
         shell: bash
