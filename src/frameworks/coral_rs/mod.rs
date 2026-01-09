@@ -4,12 +4,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use console::style;
-use itertools::Itertools;
 use quote::quote;
 use regex::Regex;
-use syn::parse_quote;
-use toml_edit::{DocumentMut, Formatted, value};
+use toml_edit::{DocumentMut, value};
 
 use crate::Runtime;
 use crate::edit::edit_file_str;
@@ -57,7 +54,7 @@ impl Template for CoralRs {
             let mut s = String::new();
             writeln!(s, ",").unwrap();
             let mut servers = vec![];
-            for (i, (mcp_name, mcp)) in self.mcps.servers.iter().enumerate() {
+            for (mcp_name, mcp) in &self.mcps.servers {
                 // TODO (alan): dedupe this
                 servers.push(match mcp {
                     McpServer::Stdio { command, args, env } => {
@@ -113,7 +110,7 @@ impl Template for CoralRs {
             .spawn()
         {
             Ok(_) => println!("Formatted"),
-            Err(e) => {
+            Err(_) => {
                 eprintln!("Failed to format coralized project. Code may look weird.");
             }
         }

@@ -12,7 +12,6 @@ use std::{
     fs::{self, File},
     hash::Hash,
     io::{self, Write},
-    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -262,7 +261,7 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
 
     // download if file doesn't exist, isn't a file, or is empty
     if fs::metadata(&artefact_path)
-        .map(|meta| !meta.is_file() || meta.size() == 0)
+        .map(|meta| !meta.is_file() || meta.len() == 0)
         .unwrap_or(true)
     {
         download().await;
