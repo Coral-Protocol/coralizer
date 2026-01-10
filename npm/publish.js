@@ -55,6 +55,15 @@ fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
 console.log(`Publishing ${pkg.name}@${version}...`);
 try {
+  // Create a local .npmrc to ensure the token is picked up
+  if (process.env.NODE_AUTH_TOKEN) {
+    const npmrcPath = path.join(appDir, '.npmrc');
+    fs.writeFileSync(npmrcPath, `//registry.npmjs.org/:_authToken=${process.env.NODE_AUTH_TOKEN}\n`);
+    console.log('Created local .npmrc with token.');
+  } else {
+    console.warn('Warning: NODE_AUTH_TOKEN is not set.');
+  }
+
   execSync('npm publish --access public', { cwd: appDir, stdio: 'inherit' });
 } catch (error) {
   console.error(`Failed to publish:`, error.message);
