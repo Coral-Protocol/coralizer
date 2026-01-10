@@ -2,18 +2,20 @@
 
 const { spawnSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 function getExePath() {
   const arch = process.arch;
   const platform = process.platform;
   const extension = platform === "win32" ? ".exe" : "";
 
-  const pkgName = `coralizer-${platform}-${arch}`;
-  try {
-    return require.resolve(pkgName);
-  } catch (e) {
-    console.error(`Error: Could not find the binary for your platform (${platform}-${arch}).`);
-    console.error(`Please ensure that the optional dependency '${pkgName}' is installed.`);
+  const exeName = `coralizer-${platform}-${arch}${extension}`;
+  const exePath = path.join(__dirname, 'bin', exeName);
+
+  if (fs.existsSync(exePath)) {
+    return exePath;
+  } else {
+    console.error(`Error: Could not find the binary for your platform (${platform}-${arch}) at ${exePath}.`);
     process.exit(1);
   }
 }

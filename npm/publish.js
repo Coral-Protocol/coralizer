@@ -10,8 +10,14 @@ if (!version) {
 
 const artifactsDir = path.join(process.cwd(), 'artifacts');
 const npmDir = path.join(process.cwd(), 'npm');
-const templatePath = path.join(npmDir, 'package.json.tmpl');
-const template = fs.readFileSync(templatePath, 'utf8');
+const appDir = path.join(npmDir, 'app');
+const binDir = path.join(appDir, 'bin');
+
+console.log('Preparing binaries...');
+if (fs.existsSync(binDir)) {
+  fs.rmSync(binDir, { recursive: true, force: true });
+}
+fs.mkdirSync(binDir, { recursive: true });
 
 const platforms = [
   { name: 'linux-x64', os: 'linux', arch: 'x64', ext: '' },
@@ -23,60 +29,34 @@ const platforms = [
 ];
 
 for (const platform of platforms) {
-  const pkgName = `coralizer-${platform.os}-${platform.arch}`;
-  const pkgDir = path.join(npmDir, pkgName);
-  const binDir = path.join(pkgDir, 'bin');
-  
-  console.log(`Preparing ${pkgName}...`);
-  if (fs.existsSync(pkgDir)) {
-    fs.rmSync(pkgDir, { recursive: true, force: true });
-  }
-  fs.mkdirSync(binDir, { recursive: true });
-  
-  // Copy binary
   const artifactBin = path.join(artifactsDir, `bin-${platform.name}`, `coralizer${platform.ext}`);
   if (!fs.existsSync(artifactBin)) {
     console.error(`Error: Artifact not found at ${artifactBin}`);
     process.exit(1);
   }
-  fs.copyFileSync(artifactBin, path.join(binDir, `coralizer${platform.ext}`));
   
-  // Generate package.json
-  const pkgJson = template
-    .split('${PKG_NAME}').join(pkgName)
-    .split('${PKG_VERSION}').join(version)
-    .split('${PKG_OS}').join(platform.os)
-    .split('${PKG_ARCH}').join(platform.arch)
-    .split('${PKG_EXT}').join(platform.ext);
+  const destName = `coralizer-${platform.os}-${platform.arch}${platform.ext}`;
+  const destPath = path.join(binDir, destName);
   
-  fs.writeFileSync(path.join(pkgDir, 'package.json'), pkgJson);
+  console.log(`Copying ${artifactBin} to ${destPath}...`);
+  fs.copyFileSync(artifactBin, destPath);
   
-  console.log(`Publishing ${pkgName}@${version}...`);
-  try {
-    execSync('npm publish --access public', { cwd: pkgDir, stdio: 'inherit' });
-  } catch (error) {
-    console.error(`Failed to publish ${pkgName}:`, error.message);
-    process.exit(1);
+  // Ensure executable permissions on Unix
+  if (platform.os !== 'win32') {
+    fs.chmodSync(destPath, 0o755);
   }
 }
 
-// Publish base package
-const basePkgDir = path.join(npmDir, 'app');
-const basePkgPath = path.join(basePkgDir, 'package.json');
-const basePkg = JSON.parse(fs.readFileSync(basePkgPath, 'utf8'));
+// Update package.json version
+const pkgPath = path.join(appDir, 'package.json');
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+pkg.version = version;
+fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
-basePkg.version = version;
-if (basePkg.optionalDependencies) {
-  for (const dep in basePkg.optionalDependencies) {
-    basePkg.optionalDependencies[dep] = version;
-  }
-}
-fs.writeFileSync(basePkgPath, JSON.stringify(basePkg, null, 2));
-
-console.log(`Publishing base package ${basePkg.name}@${version}...`);
+console.log(`Publishing ${pkg.name}@${version}...`);
 try {
-  execSync('npm publish --access public', { cwd: basePkgDir, stdio: 'inherit' });
+  execSync('npm publish --access public', { cwd: appDir, stdio: 'inherit' });
 } catch (error) {
-  console.error(`Failed to publish base package:`, error.message);
+  console.error(`Failed to publish:`, error.message);
   process.exit(1);
 }
