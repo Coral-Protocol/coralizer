@@ -1,0 +1,22 @@
+{
+  "name": "@coral-protocol/coralizer",
+  "version": "0.0.0",
+  "description": "A CLI tool built with Rust",
+  "bin": {
+    "coralizer": "index.js"
+  },
+  "files": [
+    "index.js",
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Coral-Protocol/coralizer.git"
+  },
+  "keywords": [
+    "cli",
+    "rust"
+  ],
+  "author": "",
+  "license": "MIT"
+}
