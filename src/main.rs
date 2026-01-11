@@ -30,6 +30,11 @@ use enum_derive::*;
 #[derive(Parser)]
 pub enum Cli {
     Mcp(McpParams),
+    Link(LinkParams),
+}
+#[derive(clap::Args)]
+pub struct LinkParams {
+    pub path: PathBuf,
 }
 #[derive(clap::Args)]
 pub struct McpParams {
@@ -46,6 +51,7 @@ pub mod edit;
 pub mod frameworks;
 pub mod mcp_client;
 pub mod mcp_server;
+pub mod agent_config;
 
 pub mod languages {
     use custom_derive::custom_derive;
@@ -430,6 +436,53 @@ async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     Ok(())
 }
 
+fn link_command(params: LinkParams) -> anyhow::Result<()> {
+    let abs_path = fs::canonicalize(&params.path)?;
+    let toml_path = abs_path.join("coral-agent.toml");
+    if !toml_path.exists() {
+        anyhow::bail!("coral-agent.toml not found in {}", abs_path.display());
+    }
+
+    let content = fs::read_to_string(&toml_path)?;
+    let config = agent_config::CoralAgent::from_toml(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse coral-agent.toml: {}", e))?;
+
+    let name = &config.agent.name;
+    let version = &config.agent.version;
+
+    let home = directories_next::UserDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+        .home_dir()
+        .to_path_buf();
+
+    let agents_dir = home.join(".coral").join("agents").join(name);
+    fs::create_dir_all(&agents_dir)?;
+
+    let dest_link = agents_dir.join(version);
+
+    if let Ok(meta) = fs::symlink_metadata(&dest_link) {
+        if meta.is_dir() && !meta.is_symlink() {
+            fs::remove_dir_all(&dest_link)?;
+        } else {
+            fs::remove_file(&dest_link)?;
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&abs_path, &dest_link)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&abs_path, &dest_link)?;
+
+    println!(
+        "✅ Linked {} v{} to {}",
+        name.green(),
+        version.green(),
+        dest_link.display()
+    );
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -444,6 +497,11 @@ async fn main() {
                     }
                     e => panic!("{e:?}"),
                 }
+            }
+        }
+        Cli::Link(params) => {
+            if let Err(e) = link_command(params) {
+                eprintln!("{} {}", "Error:".red(), e);
             }
         }
     }
