@@ -18,6 +18,8 @@ use std::{
 };
 use toml_edit::{DocumentMut, table, value};
 use zip::read::root_dir_common_filter;
+use colored::Colorize;
+use semver::Version;
 
 use crate::{edit::edit_file_str, frameworks::CoralRs, mcp_server::McpServers};
 use crate::{
@@ -31,6 +33,8 @@ use enum_derive::*;
 pub enum Cli {
     Mcp(McpParams),
     Link(LinkParams),
+    Unlink(LinkParams),
+    Updeletelink(LinkParams),
 }
 #[derive(clap::Args)]
 pub struct LinkParams {
@@ -153,8 +157,6 @@ impl McpKind {
         })
     }
 }
-
-use colored::Colorize;
 
 async fn mcp_wizard(params: McpParams) -> InquireResult<()> {
     if fs::exists(&params.path).unwrap() {
@@ -483,6 +485,149 @@ fn link_command(params: LinkParams) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn unlink_command(params: LinkParams) -> anyhow::Result<()> {
+    let abs_path = fs::canonicalize(&params.path)?;
+    let toml_path = abs_path.join("coral-agent.toml");
+    if !toml_path.exists() {
+        anyhow::bail!("coral-agent.toml not found in {}", abs_path.display());
+    }
+
+    let content = fs::read_to_string(&toml_path)?;
+    let config = agent_config::CoralAgent::from_toml(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse coral-agent.toml: {}", e))?;
+
+    let name = &config.agent.name;
+    let version = &config.agent.version;
+
+    let home = directories_next::UserDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+        .home_dir()
+        .to_path_buf();
+
+    let agents_dir = home.join(".coral").join("agents").join(name);
+    let dest_link = agents_dir.join(version);
+
+    if let Ok(meta) = fs::symlink_metadata(&dest_link) {
+        if meta.is_symlink() {
+            let target = fs::read_link(&dest_link)?;
+            if target == abs_path {
+                fs::remove_file(&dest_link)?;
+                println!(
+                    "✅ Unlinked {} v{} from {}",
+                    name.green(),
+                    version.green(),
+                    dest_link.display()
+                );
+            } else {
+                anyhow::bail!(
+                    "Safe Unlink: Link at {} points to {} instead of {}. Refusing to unlink.",
+                    dest_link.display(),
+                    target.display(),
+                    abs_path.display()
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "Link at {} is not a symlink. Refusing to unlink.",
+                dest_link.display()
+            );
+        }
+    } else {
+        println!(
+            "⚠️ Link at {} does not exist.",
+            dest_link.display().to_string().yellow()
+        );
+    }
+
+    Ok(())
+}
+
+fn updeletelink_command(params: LinkParams) -> anyhow::Result<()> {
+    let abs_path = fs::canonicalize(&params.path)?;
+    let toml_path = abs_path.join("coral-agent.toml");
+    if !toml_path.exists() {
+        anyhow::bail!("coral-agent.toml not found in {}", abs_path.display());
+    }
+
+    let content = fs::read_to_string(&toml_path)?;
+    let config = agent_config::CoralAgent::from_toml(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse coral-agent.toml: {}", e))?;
+
+    let name = &config.agent.name;
+
+    let home = directories_next::UserDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+        .home_dir()
+        .to_path_buf();
+
+    let agents_dir = home.join(".coral").join("agents").join(name);
+    if !agents_dir.exists() {
+        println!("⚠️ No links found for agent {}", name.yellow());
+        return Ok(());
+    }
+
+    let mut versions = Vec::new();
+    for entry in fs::read_dir(&agents_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if let Some(version_str) = path.file_name().and_then(|s| s.to_str()) {
+            if let Ok(version) = Version::parse(version_str) {
+                versions.push((version, path));
+            }
+        }
+    }
+
+    if versions.is_empty() {
+        println!(
+            "⚠️ No valid versioned links found for agent {}",
+            name.yellow()
+        );
+        return Ok(());
+    }
+
+    versions.sort_by(|(v1, _), (v2, _)| v1.cmp(v2));
+
+    let (latest_version, _) = versions.last().unwrap();
+    let latest_version_str = latest_version.to_string();
+
+    println!(
+        "ℹ️ Latest version for {} is v{}",
+        name.blue(),
+        latest_version_str.green()
+    );
+
+    if versions.len() <= 1 {
+        println!("✅ Only one version link exists. No cleanup needed.");
+        return Ok(());
+    }
+
+    for (v, path) in versions {
+        if v.to_string() == latest_version_str {
+            continue;
+        }
+        println!(
+            "🗑️ Removing old version link v{} at {}",
+            v.to_string().yellow(),
+            path.display()
+        );
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.is_dir() && !meta.is_symlink() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+
+    println!(
+        "✅ Cleanup complete for {}. Only v{} remains.",
+        name.green(),
+        latest_version_str.green()
+    );
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -501,6 +646,16 @@ async fn main() {
         }
         Cli::Link(params) => {
             if let Err(e) = link_command(params) {
+                eprintln!("{} {}", "Error:".red(), e);
+            }
+        }
+        Cli::Unlink(params) => {
+            if let Err(e) = unlink_command(params) {
+                eprintln!("{} {}", "Error:".red(), e);
+            }
+        }
+        Cli::Updeletelink(params) => {
+            if let Err(e) = updeletelink_command(params) {
                 eprintln!("{} {}", "Error:".red(), e);
             }
         }
